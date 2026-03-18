@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package mailscript;
+
+option go_package = "github.com/afterdarksys/aftermail/pkg/proto";
+
+// MailScript gRPC service for programmatic message processing
+service MailScriptService {
+    // Process a message through MailScript rules
+    rpc ProcessMessage(ProcessRequest) returns (ProcessResponse);
+
+    // Get proxy statistics
+    rpc GetStats(StatsRequest) returns (StatsResponse);
+
+    // Health check
+    rpc Health(HealthRequest) returns (HealthResponse);
+
+    // Stream message processing (for high throughput)
+    rpc ProcessMessageStream(stream ProcessRequest) returns (stream ProcessResponse);
+}
+
+message ProcessRequest {
+    string from = 1;
+    repeated string to = 2;
+    map<string, string> headers = 3;
+    string body = 4;
+    bool forward_to_upstream = 5;  // If true, forward to configured upstream server
+}
+
+message ProcessResponse {
+    bool accepted = 1;
+    string reason = 2;
+    repeated string actions = 3;
+    repeated string logs = 4;
+    map<string, string> modified_headers = 5;
+    int64 processing_time_ms = 6;
+}
+
+message StatsRequest {}
+
+message StatsResponse {
+    int64 total_connections = 1;
+    int64 active_connections = 2;
+    int64 messages_processed = 3;
+    int64 messages_accepted = 4;
+    int64 messages_rejected = 5;
+    int64 bytes_processed = 6;
+    int64 uptime_seconds = 7;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+    bool healthy = 1;
+    string version = 2;
+    string script_path = 3;
+}

@@ -1,0 +1,32 @@
+# Binaries
+mailscript
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Distribution
+dist/
+*.tar.gz
+*.zip
+
+# Test output
+*.mbox
+*.maildir
+test-results/
+
+# Go
+*.test
+*.out
+go.sum
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
