@@ -1,9 +1,10 @@
-# Binaries
-mailscript
+# Binaries (root level only, not cmd/mailscript directory)
+/mailscript
 *.exe
 *.dll
 *.so
 *.dylib
+cmd/mailscript/mailscript
 
 # Distribution
 dist/
