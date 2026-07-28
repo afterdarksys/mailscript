@@ -322,8 +322,15 @@ func ParseHeaderBlock(block []byte) []Header {
 
 		if cur != nil && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) {
 			// Continuation of the previous field (RFC 5322 folding).
+			//
+			// Raw must rejoin with CRLF, not LF. DKIM simple header
+			// canonicalisation re-emits the field byte for byte, so a bare LF
+			// here yields a different octet sequence than the signer hashed
+			// and every simple-canonicalised signature fails. The
+			// DKIM-Signature field is itself always folded, so that would be
+			// every such message, not an edge case.
 			cur.Value += " " + strings.TrimSpace(trimmedRight)
-			cur.Raw += "\n" + trimmedRight
+			cur.Raw += "\r\n" + trimmedRight
 			cur.Folded = true
 			if octets > cur.MaxOctet {
 				cur.MaxOctet = octets
