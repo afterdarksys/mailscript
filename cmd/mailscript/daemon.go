@@ -50,7 +50,7 @@ var daemonMonitorCmd = &cobra.Command{
 }
 
 var (
-	limit      int
+	limit        int
 	pollInterval int
 )
 
@@ -95,9 +95,9 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 		if err := json.Unmarshal(body, &status); err != nil {
 			return err
 		}
-		fmt.Println("✅ aftermaild is online")
+		fmt.Println("aftermaild is online")
 		for k, v := range status {
-			fmt.Printf("   %s: %v\n", k, v)
+			fmt.Printf("%s: %v\n", k, v)
 		}
 	}
 
@@ -112,9 +112,9 @@ func runDaemonTest(cmd *cobra.Command, args []string) error {
 	}
 
 	if verbose {
-		fmt.Printf("📝 Script: %s\n", scriptPath)
-		fmt.Printf("🔗 Daemon: %s\n", daemonURL)
-		fmt.Printf("📊 Testing up to %d messages\n\n", limit)
+		fmt.Printf("Script: %s\n", scriptPath)
+		fmt.Printf("Daemon: %s\n", daemonURL)
+		fmt.Printf("Testing up to %d messages\n\n", limit)
 	}
 
 	// Fetch messages from daemon
@@ -131,7 +131,7 @@ func runDaemonTest(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(messages) == 0 {
-		fmt.Println("ℹ️  No messages found in daemon inbox")
+		fmt.Println("No messages found in daemon inbox")
 		return nil
 	}
 
@@ -146,7 +146,7 @@ func runDaemonTest(cmd *cobra.Command, args []string) error {
 
 		// Execute script
 		if err := rules.ExecuteEngine(string(scriptContent), ctx); err != nil {
-			fmt.Printf("❌ [%d] Error: %v\n", i+1, err)
+			fmt.Printf("[%d] Error: %v\n", i+1, err)
 			continue
 		}
 
@@ -155,12 +155,12 @@ func runDaemonTest(cmd *cobra.Command, args []string) error {
 		if verbose {
 			sender := getString(msg, "sender")
 			subject := getString(msg, "subject")
-			fmt.Printf("  [%d] From: %s | Subject: %s | Actions: %v\n",
+			fmt.Printf("[%d] From: %s | Subject: %s | Actions: %v\n",
 				i+1, truncate(sender, 30), truncate(subject, 40), ctx.Actions)
 		}
 	}
 
-	fmt.Printf("\n✅ Processed %d messages\n", processedCount)
+	fmt.Printf("\n Processed %d messages\n", processedCount)
 	return nil
 }
 
@@ -171,9 +171,9 @@ func runDaemonMonitor(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to read script: %w", err)
 	}
 
-	fmt.Printf("🔍 Monitoring daemon at %s\n", daemonURL)
-	fmt.Printf("📝 Script: %s\n", scriptPath)
-	fmt.Printf("⏱️  Poll interval: %ds\n", pollInterval)
+	fmt.Printf("Monitoring daemon at %s\n", daemonURL)
+	fmt.Printf("Script: %s\n", scriptPath)
+	fmt.Printf("Poll interval: %ds\n", pollInterval)
 	fmt.Println("Press Ctrl+C to stop")
 	fmt.Println()
 
@@ -186,14 +186,14 @@ func runDaemonMonitor(cmd *cobra.Command, args []string) error {
 	for range ticker.C {
 		resp, err := client.Get(daemonURL + "/api/v1/inbox")
 		if err != nil {
-			fmt.Printf("⚠️  Connection error: %v\n", err)
+			fmt.Printf("WARNING: Connection error: %v\n", err)
 			continue
 		}
 
 		var messages []map[string]interface{}
 		if err := json.NewDecoder(resp.Body).Decode(&messages); err != nil {
 			resp.Body.Close()
-			fmt.Printf("⚠️  Decode error: %v\n", err)
+			fmt.Printf("WARNING: Decode error: %v\n", err)
 			continue
 		}
 		resp.Body.Close()
@@ -201,7 +201,7 @@ func runDaemonMonitor(cmd *cobra.Command, args []string) error {
 		currentCount := len(messages)
 		if currentCount > lastCount {
 			newMessages := currentCount - lastCount
-			fmt.Printf("[%s] 📬 %d new message(s)\n", time.Now().Format("15:04:05"), newMessages)
+			fmt.Printf("[%s]  %d new message(s)\n", time.Now().Format("15:04:05"), newMessages)
 
 			// Process new messages only
 			for i := lastCount; i < currentCount; i++ {
@@ -209,12 +209,12 @@ func runDaemonMonitor(cmd *cobra.Command, args []string) error {
 				ctx := buildContextFromDaemonMessage(msg)
 
 				if err := rules.ExecuteEngine(string(scriptContent), ctx); err != nil {
-					fmt.Printf("  ❌ Error processing message: %v\n", err)
+					fmt.Printf("Error processing message: %v\n", err)
 					continue
 				}
 
 				sender := getString(msg, "sender")
-				fmt.Printf("  📧 From: %s | Actions: %v\n", truncate(sender, 40), ctx.Actions)
+				fmt.Printf("From: %s | Actions: %v\n", truncate(sender, 40), ctx.Actions)
 			}
 		}
 

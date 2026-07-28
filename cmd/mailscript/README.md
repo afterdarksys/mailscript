@@ -53,7 +53,7 @@ mailscript daemon test --script=filter.star --limit=10
 mailscript daemon monitor --script=filter.star --interval=5
 ```
 
-### `mailscript proxy` - SMTP Proxy Gateway 🔥
+### `mailscript proxy` - SMTP Proxy Gateway
 
 **The Nuclear Option**: Run MailScript as a full SMTP filtering proxy that sits in front of ANY mail server.
 
@@ -82,9 +82,9 @@ mailscript proxy --script=filter.star --port=3025,3465,3587
 **Architecture:**
 ```
 [Mail Client]
-    ↓ SMTP (3025/3587)
-[MailScript Proxy] ← Apply filtering rules
-    ↓ SMTP (25/587)
+    | SMTP (3025/3587)
+[MailScript Proxy] <- Apply filtering rules
+    | SMTP (25/587)
 [Your Mail Server]
 ```
 
@@ -191,13 +191,13 @@ protoc --go_out=. --go-grpc_out=. pkg/proto/mailscript.proto
 
 MailScript is now a **universal email filtering engine** that can:
 
-1. ✅ Run standalone without AfterMail
-2. ✅ Integrate into ANY email infrastructure
-3. ✅ Process messages via SMTP proxy
-4. ✅ Accept messages via gRPC from ANY app
-5. ✅ Test offline before production
-6. ✅ Monitor live systems
-7. ✅ Export results as JSON for automation
+1.  Run standalone without AfterMail
+2.  Integrate into ANY email infrastructure
+3.  Process messages via SMTP proxy
+4.  Accept messages via gRPC from ANY app
+5.  Test offline before production
+6.  Monitor live systems
+7.  Export results as JSON for automation
 
 You can literally drop MailScript in front of Gmail, Exchange, Postfix, SendGrid, Mailgun, or your custom mail server and add enterprise-grade filtering **without touching their code**.
 
@@ -211,6 +211,6 @@ The proxy mode turns MailScript from "a nice filtering tool" into **a weaponized
 - Integrate with non-mail apps
 - Track everything
 
-And it's so easy to deploy that anyone can do it. Hence: going to hell. 😈
+And it's so easy to deploy that anyone can do it. Hence: going to hell.
 
 But it's also **incredibly useful** for legitimate use cases like compliance, security, testing, and integration.

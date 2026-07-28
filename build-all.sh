@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🌍 Building MailScript for multiple platforms..."
+echo " Building MailScript for multiple platforms..."
 
 VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
@@ -33,19 +33,19 @@ for PLATFORM in "${PLATFORMS[@]}"; do
         OUTPUT="${OUTPUT}.exe"
     fi
 
-    echo "🔨 Building for $GOOS/$GOARCH..."
+    echo " Building for $GOOS/$GOARCH..."
     GOOS=$GOOS GOARCH=$GOARCH go build -ldflags="$LDFLAGS" -o "$OUTPUT" ./cmd/mailscript
 
     # Create tarball (except for Windows)
     if [ "$GOOS" != "windows" ]; then
         tar -czf "${OUTPUT}.tar.gz" -C dist "$(basename $OUTPUT)"
         rm "$OUTPUT"
-        echo "   ✅ ${OUTPUT}.tar.gz"
+        echo "${OUTPUT}.tar.gz"
     else
-        echo "   ✅ $OUTPUT"
+        echo "$OUTPUT"
     fi
 done
 
 echo ""
-echo "✅ Build complete! Binaries in dist/"
+echo " Build complete! Binaries in dist/"
 ls -lh dist/

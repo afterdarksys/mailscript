@@ -78,6 +78,8 @@ func init() {
 	proxyCmd.Flags().IntVar(&grpcPort, "grpc-port", 50051, "gRPC port for programmatic access")
 	proxyCmd.Flags().IntVar(&maxConnections, "max-connections", 100, "Maximum concurrent connections")
 
+	addRuntimeFlags(proxyCmd)
+
 	proxyCmd.MarkFlagRequired("script")
 }
 
@@ -88,8 +90,15 @@ func runProxy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to read script: %w", err)
 	}
 
+	rt, err := buildRuntime()
+	if err != nil {
+		return err
+	}
+
 	proxy := &SMTPProxy{
 		script:         string(scriptContent),
+		scriptName:     scriptPath,
+		runtime:        rt,
 		upstreamServer: upstreamServer,
 		maxConnections: maxConnections,
 		connections:    make(map[string]time.Time),
@@ -113,15 +122,15 @@ func runProxy(cmd *cobra.Command, args []string) error {
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS12,
 		}
-		fmt.Println("🔒 TLS enabled")
+		fmt.Println("TLS enabled")
 	} else if disableTLS {
-		fmt.Println("⚠️  TLS disabled - running in plaintext mode")
+		fmt.Println("WARNING: TLS disabled, running in plaintext mode")
 	}
 
 	// Start gRPC server
 	go func() {
 		if err := proxy.startGRPCServer(grpcPort); err != nil {
-			log.Printf("❌ gRPC server error: %v", err)
+			log.Printf("gRPC server error: %v", err)
 		}
 	}()
 
@@ -132,17 +141,17 @@ func runProxy(cmd *cobra.Command, args []string) error {
 		go func(p int) {
 			defer wg.Done()
 			if err := proxy.listenSMTP(p); err != nil {
-				log.Printf("❌ SMTP listener error on port %d: %v", p, err)
+				log.Printf("SMTP listener error on port %d: %v", p, err)
 			}
 		}(port)
 	}
 
-	fmt.Printf("🚀 MailScript SMTP Proxy started\n")
-	fmt.Printf("📝 Script: %s\n", scriptPath)
-	fmt.Printf("📬 SMTP ports: %v\n", proxyPorts)
-	fmt.Printf("🔌 gRPC port: %d\n", grpcPort)
+	fmt.Printf("MailScript SMTP proxy started\n")
+	fmt.Printf("Script:     %s\n", scriptPath)
+	fmt.Printf("SMTP ports: %v\n", proxyPorts)
+	fmt.Printf("gRPC port:  %d\n", grpcPort)
 	if upstreamServer != "" {
-		fmt.Printf("⬆️  Upstream: %s\n", upstreamServer)
+		fmt.Printf("Upstream:   %s\n", upstreamServer)
 	}
 	fmt.Println()
 	fmt.Println("Press Ctrl+C to stop")
@@ -153,6 +162,8 @@ func runProxy(cmd *cobra.Command, args []string) error {
 
 type SMTPProxy struct {
 	script         string
+	scriptName     string
+	runtime        *runtime
 	upstreamServer string
 	tlsConfig      *tls.Config
 	maxConnections int
@@ -172,6 +183,16 @@ type ProxyStats struct {
 	sync.Mutex
 }
 
+// engineOptions returns the execution options for one message.
+func (p *SMTPProxy) engineOptions() rules.Options {
+	if p.runtime != nil {
+		return p.runtime.engineOptions(p.scriptName)
+	}
+	opts := rules.DefaultOptions()
+	opts.Filename = p.scriptName
+	return opts
+}
+
 func (p *SMTPProxy) listenSMTP(port int) error {
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -179,7 +200,7 @@ func (p *SMTPProxy) listenSMTP(port int) error {
 	}
 	defer listener.Close()
 
-	log.Printf("📬 SMTP listening on port %d", port)
+	log.Printf("SMTP listening on port %d", port)
 
 	for {
 		conn, err := listener.Accept()
@@ -207,7 +228,7 @@ func (p *SMTPProxy) handleSMTPConnection(conn net.Conn) {
 
 	remoteAddr := conn.RemoteAddr().String()
 	if verbose {
-		log.Printf("📨 New connection from %s", remoteAddr)
+		log.Printf("new connection from %s", remoteAddr)
 	}
 
 	// Track connection
@@ -219,6 +240,9 @@ func (p *SMTPProxy) handleSMTPConnection(conn net.Conn) {
 		conn:   conn,
 		reader: bufio.NewReader(conn),
 		proxy:  p,
+	}
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		session.clientIP = host
 	}
 
 	// Send greeting
@@ -247,7 +271,7 @@ func (p *SMTPProxy) handleSMTPConnection(conn net.Conn) {
 		cmd := strings.ToUpper(parts[0])
 
 		if verbose {
-			log.Printf("← %s: %s", remoteAddr, line)
+			log.Printf("<- %s: %s", remoteAddr, line)
 		}
 
 		switch cmd {
@@ -277,17 +301,22 @@ func (p *SMTPProxy) handleSMTPConnection(conn net.Conn) {
 }
 
 type SMTPSession struct {
-	conn      net.Conn
-	reader    *bufio.Reader
-	proxy     *SMTPProxy
-	from      string
+	conn       net.Conn
+	reader     *bufio.Reader
+	proxy      *SMTPProxy
+	from       string
 	recipients []string
-	data      []byte
+	data       []byte
+	// helo is the name the client announced, and clientIP the address it
+	// connected from. SPF authenticates the envelope against these, not
+	// against anything inside the message.
+	helo     string
+	clientIP string
 }
 
 func (s *SMTPSession) writeLine(msg string) {
 	if verbose {
-		log.Printf("→ %s", msg)
+		log.Printf("-> %s", msg)
 	}
 	s.conn.Write([]byte(msg + "\r\n"))
 }
@@ -297,6 +326,7 @@ func (s *SMTPSession) handleHELO(parts []string) {
 		s.writeLine("501 Syntax: HELO hostname")
 		return
 	}
+	s.helo = parts[1]
 	s.writeLine("250 MailScript SMTP Proxy")
 }
 
@@ -306,6 +336,7 @@ func (s *SMTPSession) handleEHLO(parts []string) {
 		return
 	}
 
+	s.helo = parts[1]
 	s.writeLine("250-MailScript SMTP Proxy")
 	s.writeLine("250-PIPELINING")
 	s.writeLine("250-8BITMIME")
@@ -400,55 +431,32 @@ func (s *SMTPSession) handleDATA() {
 }
 
 func (s *SMTPSession) processWithMailScript() (bool, string) {
-	// Parse message headers
-	headers := make(map[string]string)
-	lines := strings.Split(string(s.data), "\n")
-
-	var body strings.Builder
-	inHeaders := true
-
-	for _, line := range lines {
-		line = strings.TrimRight(line, "\r")
-
-		if inHeaders {
-			if line == "" {
-				inHeaders = false
-				continue
-			}
-
-			if strings.Contains(line, ":") {
-				parts := strings.SplitN(line, ":", 2)
-				if len(parts) == 2 {
-					headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-				}
-			}
-		} else {
-			body.WriteString(line)
-			body.WriteString("\n")
-		}
+	// Parse with the full message parser rather than splitting on colons.
+	// A hand-rolled map would collapse duplicate fields, discard the original
+	// bytes, and skip MIME decoding, which would silently disable duplicate
+	// From detection, DKIM verification and attachment inspection.
+	ctx, err := rules.ParseMessage(s.data)
+	if err != nil {
+		log.Printf("message parse error: %v", err)
+		return false, "Message could not be parsed"
 	}
 
-	// Add envelope info
-	headers["X-Envelope-From"] = s.from
-	headers["X-Envelope-To"] = strings.Join(s.recipients, ", ")
+	// Envelope and connection facts the message itself cannot be trusted for.
+	ctx.EnvelopeFrom = s.from
+	ctx.EnvelopeTo = s.recipients
+	ctx.EnvelopeSenders = []string{s.from}
+	ctx.HELO = s.helo
+	if s.clientIP != "" {
+		ctx.SenderIP = s.clientIP
+	}
+	ctx.VirusStatus = "unknown"
 
-	// Create message context
-	ctx := &rules.MessageContext{
-		Headers:         headers,
-		Body:            body.String(),
-		MimeType:        headers["Content-Type"],
-		SpamScore:       0.0,
-		VirusStatus:     "clean",
-		Actions:         []string{},
-		LogEntries:      []string{},
-		ModifiedHeaders: make(map[string]string),
-		SenderDomain:    extractDomain(s.from),
-		DNSResolved:     true,
-		RBLListed:       false,
+	if rt := s.proxy.runtime; rt != nil {
+		rt.apply(ctx)
 	}
 
 	// Execute script
-	if err := rules.ExecuteEngine(s.proxy.script, ctx); err != nil {
+	if err := rules.ExecuteEngineWithOptions(s.proxy.script, ctx, s.proxy.engineOptions()); err != nil {
 		log.Printf("MailScript error: %v", err)
 		return false, "Script execution error"
 	}
@@ -478,7 +486,7 @@ func (s *SMTPSession) forwardToUpstream() error {
 		return nil
 	}
 
-	log.Printf("⬆️  Forwarding to upstream: %s", s.proxy.upstreamServer)
+	log.Printf("Forwarding to upstream: %s", s.proxy.upstreamServer)
 
 	// Connect to upstream server
 	conn, err := net.DialTimeout("tcp", s.proxy.upstreamServer, 30*time.Second)
@@ -506,7 +514,7 @@ func (s *SMTPSession) forwardToUpstream() error {
 			return fmt.Errorf("EHLO response error: %w", err)
 		}
 		if verbose {
-			log.Printf("← %s", strings.TrimSpace(line))
+			log.Printf("<- %s", strings.TrimSpace(line))
 		}
 		if !strings.HasPrefix(line, "250-") {
 			break
@@ -550,7 +558,7 @@ func (s *SMTPSession) forwardToUpstream() error {
 	// Send QUIT
 	fmt.Fprintf(conn, "QUIT\r\n")
 
-	log.Printf("✅ Message forwarded successfully to upstream")
+	log.Printf("Message forwarded successfully to upstream")
 	return nil
 }
 
@@ -577,6 +585,5 @@ func (s *SMTPSession) handleSTARTTLS() {
 
 	s.conn = tlsConn
 	s.reader = bufio.NewReader(tlsConn)
-	log.Printf("🔒 TLS connection established")
+	log.Printf("TLS connection established")
 }
-

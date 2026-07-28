@@ -68,9 +68,9 @@ func runProcess(cmd *cobra.Command, args []string) error {
 	}
 
 	if verbose {
-		fmt.Printf("📝 Script: %s\n", scriptPath)
+		fmt.Printf("Script: %s\n", scriptPath)
 		if dryRun {
-			fmt.Println("🔍 DRY RUN MODE - no actions will be performed")
+			fmt.Println("DRY RUN MODE - no actions will be performed")
 		}
 		fmt.Println()
 	}
@@ -97,8 +97,8 @@ func runProcess(cmd *cobra.Command, args []string) error {
 	}
 
 	// Print summary
-	fmt.Printf("\n📊 Summary:\n")
-	fmt.Printf("   Total processed: %d messages\n", len(results))
+	fmt.Printf("\n Summary:\n")
+	fmt.Printf("Total processed: %d messages\n", len(results))
 
 	// Count actions
 	actionCounts := make(map[string]int)
@@ -111,7 +111,7 @@ func runProcess(cmd *cobra.Command, args []string) error {
 	if len(actionCounts) > 0 {
 		fmt.Println("\n   Actions taken:")
 		for action, count := range actionCounts {
-			fmt.Printf("   - %s: %d\n", action, count)
+			fmt.Printf("- %s: %d\n", action, count)
 		}
 	}
 
@@ -119,18 +119,18 @@ func runProcess(cmd *cobra.Command, args []string) error {
 }
 
 type ProcessResult struct {
-	MessageNum int                 `json:"message_num"`
-	From       string              `json:"from"`
-	Subject    string              `json:"subject"`
-	Actions    []string            `json:"actions"`
-	Logs       []string            `json:"logs,omitempty"`
-	Headers    map[string]string   `json:"modified_headers,omitempty"`
-	Error      string              `json:"error,omitempty"`
+	MessageNum int               `json:"message_num"`
+	From       string            `json:"from"`
+	Subject    string            `json:"subject"`
+	Actions    []string          `json:"actions"`
+	Logs       []string          `json:"logs,omitempty"`
+	Headers    map[string]string `json:"modified_headers,omitempty"`
+	Error      string            `json:"error,omitempty"`
 }
 
 func processMbox(path string, script string) ([]ProcessResult, error) {
 	if verbose {
-		fmt.Printf("📦 Processing mbox: %s\n", path)
+		fmt.Printf("Processing mbox: %s\n", path)
 	}
 
 	file, err := os.Open(path)
@@ -191,7 +191,7 @@ func processMbox(path string, script string) ([]ProcessResult, error) {
 
 func processMaildir(path string, script string) ([]ProcessResult, error) {
 	if verbose {
-		fmt.Printf("📂 Processing Maildir: %s\n", path)
+		fmt.Printf("Processing Maildir: %s\n", path)
 	}
 
 	dirs := []string{
@@ -299,7 +299,7 @@ func processMessage(msgNum int, raw []byte, script string) ProcessResult {
 	result.Headers = ctx.ModifiedHeaders
 
 	if verbose {
-		fmt.Printf("  [%d] From: %s | Subject: %s | Actions: %v\n",
+		fmt.Printf("[%d] From: %s | Subject: %s | Actions: %v\n",
 			msgNum, truncate(from, 30), truncate(subject, 40), ctx.Actions)
 	}
 

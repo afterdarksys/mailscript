@@ -182,9 +182,9 @@ func (p *SMTPProxy) startGRPCServer(port int) error {
 
 	// Register service - NOTE: This requires generating the proto code
 	// For now, this is a placeholder showing the structure
-	log.Printf("🔌 gRPC server placeholder on port %d", port)
-	log.Printf("⚠️  Note: Run 'protoc' to generate gRPC bindings from mailscript.proto")
-	log.Printf("📝 Proto file: pkg/proto/mailscript.proto")
+	log.Printf("gRPC server placeholder on port %d", port)
+	log.Printf("Note: Run 'protoc' to generate gRPC bindings from mailscript.proto")
+	log.Printf("Proto file: pkg/proto/mailscript.proto")
 
 	// TODO: Uncomment after generating proto code
 	// RegisterMailScriptServiceServer(grpcServer, &MailScriptServiceServer{proxy: p})

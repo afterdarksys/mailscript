@@ -19,7 +19,10 @@ test-results/
 # Go
 *.test
 *.out
-go.sum
+
+# go.sum is deliberately NOT ignored. It pins the checksum of every module in
+# the build, so an altered or substituted dependency fails verification rather
+# than being compiled in silently.
 
 # IDEs
 .idea/
@@ -31,3 +34,14 @@ go.sum
 # OS
 .DS_Store
 Thumbs.db
+
+# Agent operational state (see CLAUDE.md); .omc/skills is the committable exception
+.omc/
+!.omc/skills/
+
+# asdf toolchain pin
+# .tool-versions is intentionally committed
+
+# Machine-local Claude Code settings and their temp files
+.claude/settings.local.json
+.claude/*.tmp.*

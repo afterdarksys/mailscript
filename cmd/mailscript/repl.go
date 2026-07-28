@@ -33,7 +33,7 @@ func init() {
 }
 
 func runREPL(cmd *cobra.Command, args []string) error {
-	fmt.Println("🚀 MailScript Interactive REPL")
+	fmt.Println("MailScript Interactive REPL")
 	fmt.Println("Type 'help' for commands, 'exit' to quit")
 	fmt.Println()
 
@@ -44,7 +44,7 @@ func runREPL(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to read script: %w", err)
 		}
 		scriptContent = string(content)
-		fmt.Printf("📝 Loaded script: %s\n\n", scriptPath)
+		fmt.Printf("Loaded script: %s\n\n", scriptPath)
 	}
 
 	// Default test message
@@ -54,15 +54,15 @@ func runREPL(cmd *cobra.Command, args []string) error {
 			"To":      "recipient@example.com",
 			"Subject": "Test Message",
 		},
-		Body:          "This is a test message body.",
-		MimeType:      "text/plain",
-		SpamScore:     0.0,
-		VirusStatus:   "clean",
-		Actions:       []string{},
-		LogEntries:    []string{},
-		SenderDomain:  "example.com",
-		DNSResolved:   true,
-		RBLListed:     false,
+		Body:         "This is a test message body.",
+		MimeType:     "text/plain",
+		SpamScore:    0.0,
+		VirusStatus:  "clean",
+		Actions:      []string{},
+		LogEntries:   []string{},
+		SenderDomain: "example.com",
+		DNSResolved:  true,
+		RBLListed:    false,
 	}
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -86,63 +86,63 @@ func runREPL(cmd *cobra.Command, args []string) error {
 			printREPLHelp()
 
 		case "exit", "quit":
-			fmt.Println("👋 Goodbye!")
+			fmt.Println("Goodbye!")
 			return nil
 
 		case "run":
 			if scriptContent == "" {
-				fmt.Println("❌ No script loaded. Use 'load' or 'edit' first.")
+				fmt.Println("No script loaded. Use 'load' or 'edit' first.")
 				continue
 			}
 			runScript(scriptContent, ctx)
 
 		case "load":
 			if len(args) < 2 {
-				fmt.Println("❌ Usage: load <path>")
+				fmt.Println("Usage: load <path>")
 				continue
 			}
 			content, err := os.ReadFile(args[1])
 			if err != nil {
-				fmt.Printf("❌ Error: %v\n", err)
+				fmt.Printf("Error: %v\n", err)
 				continue
 			}
 			scriptContent = string(content)
-			fmt.Printf("✅ Loaded script from %s\n", args[1])
+			fmt.Printf("Loaded script from %s\n", args[1])
 
 		case "show":
 			if scriptContent == "" {
-				fmt.Println("❌ No script loaded")
+				fmt.Println("No script loaded")
 				continue
 			}
-			fmt.Println("📜 Current script:")
+			fmt.Println("Current script:")
 			fmt.Println("---")
 			fmt.Println(scriptContent)
 			fmt.Println("---")
 
 		case "set":
 			if len(args) < 3 {
-				fmt.Println("❌ Usage: set <header> <value>")
+				fmt.Println("Usage: set <header> <value>")
 				continue
 			}
 			header := args[1]
 			value := strings.Join(args[2:], " ")
 			ctx.Headers[header] = value
-			fmt.Printf("✅ Set %s = %s\n", header, value)
+			fmt.Printf("Set %s = %s\n", header, value)
 
 		case "get":
 			if len(args) < 2 {
-				fmt.Println("❌ Usage: get <header>")
+				fmt.Println("Usage: get <header>")
 				continue
 			}
 			header := args[1]
 			if val, ok := ctx.Headers[header]; ok {
 				fmt.Printf("%s: %s\n", header, val)
 			} else {
-				fmt.Printf("❌ Header '%s' not set\n", header)
+				fmt.Printf("Header '%s' not set\n", header)
 			}
 
 		case "headers":
-			fmt.Println("📋 Current headers:")
+			fmt.Println("Current headers:")
 			for k, v := range ctx.Headers {
 				fmt.Printf("  %s: %s\n", k, v)
 			}
@@ -153,7 +153,7 @@ func runREPL(cmd *cobra.Command, args []string) error {
 				continue
 			}
 			ctx.Body = strings.Join(args[1:], " ")
-			fmt.Printf("✅ Set body\n")
+			fmt.Printf("Set body\n")
 
 		case "spam":
 			if len(args) < 2 {
@@ -163,16 +163,16 @@ func runREPL(cmd *cobra.Command, args []string) error {
 			var score float64
 			fmt.Sscanf(args[1], "%f", &score)
 			ctx.SpamScore = score
-			fmt.Printf("✅ Set spam score to %.1f\n", score)
+			fmt.Printf("Set spam score to %.1f\n", score)
 
 		case "reset":
 			ctx.Actions = []string{}
 			ctx.LogEntries = []string{}
 			ctx.ModifiedHeaders = make(map[string]string)
-			fmt.Println("✅ Reset message context")
+			fmt.Println("Reset message context")
 
 		case "edit":
-			fmt.Println("📝 Enter MailScript code (end with 'END' on a line by itself):")
+			fmt.Println("Enter MailScript code (end with 'END' on a line by itself):")
 			var code strings.Builder
 			for scanner.Scan() {
 				line := scanner.Text()
@@ -183,10 +183,71 @@ func runREPL(cmd *cobra.Command, args []string) error {
 				code.WriteString("\n")
 			}
 			scriptContent = code.String()
-			fmt.Println("✅ Script updated")
+			fmt.Println("Script updated")
+
+		case "eml":
+			if len(args) < 2 {
+				fmt.Println("Usage: eml <path>")
+				continue
+			}
+			raw, err := os.ReadFile(args[1])
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				continue
+			}
+			loaded, err := rules.ParseMessage(raw)
+			if err != nil {
+				fmt.Printf("Parse error: %v\n", err)
+				continue
+			}
+			*ctx = *loaded
+			fmt.Printf("Loaded %s: %d headers, %d bytes of body\n",
+				args[1], len(ctx.HeaderList), ctx.BodySize)
+
+		case "validate":
+			findings := ctx.ValidateHeaders()
+			if len(findings) == 0 {
+				fmt.Println("No findings.")
+				continue
+			}
+			for _, f := range findings {
+				fmt.Printf("  [%-8s] %-32s %s\n", strings.ToUpper(f.Severity), f.Code, f.Message)
+			}
+
+		case "class", "human":
+			assessment := ctx.AssessHuman()
+			fmt.Printf("Class: %s (human score %.0f/100)\n", assessment.Class, assessment.Score)
+			for _, reason := range assessment.Reasons {
+				fmt.Printf("  %s\n", reason)
+			}
+
+		case "urls":
+			urls := ctx.URLs()
+			if len(urls) == 0 {
+				fmt.Println("No URLs.")
+				continue
+			}
+			for _, u := range urls {
+				fmt.Printf("  %s\n", u)
+			}
+			for _, m := range ctx.URLDisplayMismatches() {
+				fmt.Printf("  MISMATCH: text %q points to %s\n", m.DisplayText, m.HrefHost)
+			}
+
+		case "auth":
+			reported := ctx.AuthResults()
+			if !reported.Present {
+				fmt.Println("No Authentication-Results header.")
+				continue
+			}
+			fmt.Printf("Reported: spf=%s dkim=%s dmarc=%s (trusted=%t)\n",
+				reported.SPF, reported.DKIM, reported.DMARC, reported.Trusted)
+			if !reported.Trusted {
+				fmt.Println("These values can be forged by the sender.")
+			}
 
 		default:
-			fmt.Printf("❌ Unknown command: %s (type 'help' for commands)\n", command)
+			fmt.Printf("Unknown command: %s (type 'help' for commands)\n", command)
 		}
 	}
 
@@ -194,31 +255,39 @@ func runREPL(cmd *cobra.Command, args []string) error {
 }
 
 func printREPLHelp() {
-	fmt.Println(`
-MailScript REPL Commands:
+	fmt.Print(`
+MailScript REPL commands
 
-  help              Show this help message
-  exit, quit        Exit the REPL
+General:
+  help                    Show this help
+  exit, quit              Leave the REPL
 
-Script Management:
-  load <path>       Load a MailScript from file
-  show              Display the current script
-  edit              Edit the script inline (end with 'END')
-  run               Execute the current script
+Script:
+  load <path>             Load a script from a file
+  show                    Display the current script
+  edit                    Enter a script inline (end with 'END')
+  run                     Execute the current script
 
-Message Context:
-  set <header> <value>    Set a header value
-  get <header>            Get a header value
-  headers                 Show all headers
-  body [text]             Get or set message body
-  spam [score]            Get or set spam score (0.0-10.0)
-  reset                   Reset actions and logs
+Message:
+  eml <path>              Load a real message from a file
+  set <header> <value>    Set a header
+  get <header>            Read a header
+  headers                 List all headers
+  body [text]             Read or set the body
+  spam [score]            Read or set the supplied spam score
+  reset                   Clear actions and logs
 
-Example workflow:
+Analysis (no script needed):
+  validate                Header validation findings
+  class, human            Sender classification and the evidence for it
+  urls                    Extracted URLs and any display mismatches
+  auth                    Reported authentication, and whether it is trusted
+
+Example:
+  mailscript> eml suspicious.eml
+  mailscript> validate
+  mailscript> class
   mailscript> load filter.star
-  mailscript> set From spam@example.com
-  mailscript> set Subject "Cheap deals!!!"
-  mailscript> spam 8.5
   mailscript> run
 `)
 }
@@ -233,31 +302,31 @@ func runScript(script string, ctx *rules.MessageContext) {
 
 	// Execute
 	if err := rules.ExecuteEngine(script, ctx); err != nil {
-		fmt.Printf("❌ Script error: %v\n", err)
+		fmt.Printf("Script error: %v\n", err)
 		return
 	}
 
 	// Display results
-	fmt.Println("✅ Script executed successfully!")
+	fmt.Println("Script executed successfully!")
 
 	if len(ctx.Actions) > 0 {
-		fmt.Println("\n📋 Actions:")
+		fmt.Println("\n Actions:")
 		for _, action := range ctx.Actions {
-			fmt.Printf("  - %s\n", action)
+			fmt.Printf("- %s\n", action)
 		}
 	} else {
-		fmt.Println("\n📋 Actions: (none)")
+		fmt.Println("\n Actions: (none)")
 	}
 
 	if len(ctx.LogEntries) > 0 {
-		fmt.Println("\n📜 Logs:")
+		fmt.Println("\n Logs:")
 		for _, entry := range ctx.LogEntries {
-			fmt.Printf("  %s\n", entry)
+			fmt.Printf("%s\n", entry)
 		}
 	}
 
 	if len(ctx.ModifiedHeaders) > 0 {
-		fmt.Println("\n✏️  Modified Headers:")
+		fmt.Println("\n  Modified Headers:")
 		for k, v := range ctx.ModifiedHeaders {
 			fmt.Printf("  %s: %s\n", k, v)
 		}

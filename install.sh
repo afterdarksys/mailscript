@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "📦 MailScript Installer"
+echo " MailScript Installer"
 echo ""
 
 # Detect OS and architecture
@@ -16,7 +16,7 @@ case $ARCH in
         ARCH="arm64"
         ;;
     *)
-        echo "❌ Unsupported architecture: $ARCH"
+        echo " Unsupported architecture: $ARCH"
         exit 1
         ;;
 esac
@@ -32,25 +32,25 @@ else
     mkdir -p "$INSTALL_DIR"
 fi
 
-echo "🎯 Detected: $OS/$ARCH"
-echo "📂 Install directory: $INSTALL_DIR"
+echo " Detected: $OS/$ARCH"
+echo " Install directory: $INSTALL_DIR"
 echo ""
 
 # Check if already installed
 if [ -f "$INSTALL_DIR/mailscript" ]; then
-    echo "⚠️  MailScript is already installed at $INSTALL_DIR/mailscript"
-    read -p "   Overwrite? (y/N): " -n 1 -r
+    echo "WARNING:  MailScript is already installed at $INSTALL_DIR/mailscript"
+    read -p "Overwrite? (y/N): " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "❌ Installation cancelled"
+        echo " Installation cancelled"
         exit 0
     fi
 fi
 
 # Build from source
-echo "🔨 Building from source..."
+echo " Building from source..."
 if [ ! -f "./build.sh" ]; then
-    echo "❌ build.sh not found. Are you in the mailscript directory?"
+    echo " build.sh not found. Are you in the mailscript directory?"
     exit 1
 fi
 
@@ -58,21 +58,21 @@ chmod +x build.sh
 ./build.sh
 
 # Install binary
-echo "📥 Installing to $INSTALL_DIR..."
+echo " Installing to $INSTALL_DIR..."
 cp mailscript "$INSTALL_DIR/mailscript"
 chmod +x "$INSTALL_DIR/mailscript"
 
 # Verify installation
 if command -v mailscript &> /dev/null; then
-    echo "✅ Installation successful!"
+    echo " Installation successful!"
     echo ""
     mailscript --version || mailscript --help | head -5
     echo ""
-    echo "🚀 Get started:"
-    echo "   mailscript test --script=examples/spam-filter.star"
-    echo "   mailscript --help"
+    echo " Get started:"
+    echo "mailscript test --script=examples/spam-filter.star"
+    echo "mailscript --help"
 else
-    echo "⚠️  Installation complete but mailscript not in PATH"
-    echo "   Add to PATH: export PATH=\"$INSTALL_DIR:\$PATH\""
-    echo "   Or run directly: $INSTALL_DIR/mailscript"
+    echo "WARNING:  Installation complete but mailscript not in PATH"
+    echo "Add to PATH: export PATH=\"$INSTALL_DIR:\$PATH\""
+    echo "Or run directly: $INSTALL_DIR/mailscript"
 fi
