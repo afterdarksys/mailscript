@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -36,6 +37,8 @@ var (
 	heloName        string
 	maxSteps        uint64
 	scriptTimeout   time.Duration
+	clamAVURL       string
+	clamAVTimeout   time.Duration
 )
 
 // addRuntimeFlags registers the flags shared by every rule-executing command.
@@ -66,6 +69,8 @@ func addRuntimeFlags(cmd *cobra.Command) {
 
 	f.Uint64Var(&maxSteps, "max-steps", rules.DefaultMaxSteps, "Starlark execution step limit per message")
 	f.DurationVar(&scriptTimeout, "script-timeout", rules.DefaultTimeout, "Wall-clock limit per message")
+	f.StringVar(&clamAVURL, "clamav-url", "", "Private clamav-api-go base URL (e.g. http://clamav-api:8080)")
+	f.DurationVar(&clamAVTimeout, "clamav-timeout", 30*time.Second, "Maximum ClamAV scan duration")
 }
 
 // runtime holds the resources built from the shared flags.
@@ -74,6 +79,7 @@ type runtime struct {
 	models   *ml.Registry
 	bert     *ml.BertTokenizer
 	lists    map[string]map[string]bool
+	clamav   *clamAVScanner
 }
 
 // buildRuntime constructs the shared resources, failing closed on any
@@ -108,6 +114,9 @@ func buildRuntime() (*runtime, error) {
 				return nil, fmt.Errorf("load model %q: %w", path, err)
 			}
 		}
+	}
+	if clamAVURL != "" {
+		rt.clamav = newClamAVScanner(strings.TrimRight(clamAVURL, "/"), clamAVTimeout)
 	}
 
 	if bertVocabPath != "" {
@@ -179,6 +188,21 @@ func (rt *runtime) apply(ctx *rules.MessageContext) {
 	ctx.Resolver = rt.resolver
 	ctx.Lists = rt.lists
 	ctx.TrustedAuthServs = trustedAuthServ
+	if rt.clamav != nil {
+		result, err := rt.clamav.scan(context.Background(), append(append([]byte{}, ctx.RawHeaderBlock...), ctx.RawBody...))
+		if err != nil {
+			ctx.VirusStatus = "unknown"
+			ctx.LogEntries = append(ctx.LogEntries, "clamav unavailable: "+err.Error())
+		} else {
+			ctx.AVAvailable = true
+			if result.VirusFound {
+				ctx.VirusStatus = "infected"
+				ctx.AVSignature = result.Signature
+			} else {
+				ctx.VirusStatus = "clean"
+			}
+		}
+	}
 
 	if clientIP != "" {
 		ctx.SenderIP = clientIP

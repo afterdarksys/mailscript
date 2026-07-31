@@ -67,6 +67,8 @@ type MessageContext struct {
 	MimeType        string  // top-level Content-Type value
 	SpamScore       float64 // externally supplied spam score (0.0 to 10.0)
 	VirusStatus     string  // virus scan status: "clean", "infected", "unknown"
+	AVSignature     string  // scanner signature when VirusStatus is infected
+	AVAvailable     bool    // whether an AV scanner was configured and responded
 	SenderDID       string
 	Actions         []string          // actions taken by the script, in order
 	ModifiedHeaders map[string]string // headers added or modified by the script

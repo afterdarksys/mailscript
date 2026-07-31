@@ -694,6 +694,10 @@ func (e *scriptEnv) metadataBuiltins() starlark.StringDict {
 		"getmimetype":    nullaryStr("getmimetype", func() string { return msg.MimeType }),
 		"getspamscore":   nullaryFloat("getspamscore", func() float64 { return msg.SpamScore }),
 		"getvirusstatus": nullaryStr("getvirusstatus", func() string { return msg.VirusStatus }),
+		"av_available":   nullaryBool("av_available", func() bool { return msg.AVAvailable }),
+		"av_clean":       nullaryBool("av_clean", func() bool { return msg.AVAvailable && msg.VirusStatus == "clean" }),
+		"av_infected":    nullaryBool("av_infected", func() bool { return msg.VirusStatus == "infected" }),
+		"av_signature":   nullaryStr("av_signature", func() string { return msg.AVSignature }),
 		"body_size":      nullary("body_size", func() starlark.Value { return starlark.MakeInt64(msg.BodySize) }),
 		"message_size": nullary("message_size", func() starlark.Value {
 			return starlark.MakeInt64(msg.BodySize + msg.HeaderSize)

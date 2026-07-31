@@ -55,14 +55,15 @@ Examples:
 }
 
 var (
-	proxyPorts     []int
-	enableTLS      bool
-	disableTLS     bool
-	certFile       string
-	keyFile        string
-	upstreamServer string
-	grpcPort       int
-	maxConnections int
+	proxyPorts        []int
+	enableTLS         bool
+	disableTLS        bool
+	certFile          string
+	keyFile           string
+	upstreamServer    string
+	grpcPort          int
+	maxConnections    int
+	forwardQuarantine bool
 )
 
 func init() {
@@ -77,6 +78,7 @@ func init() {
 	proxyCmd.Flags().StringVar(&upstreamServer, "upstream", "", "Upstream SMTP server (e.g., mail.example.com:25)")
 	proxyCmd.Flags().IntVar(&grpcPort, "grpc-port", 50051, "gRPC port for programmatic access")
 	proxyCmd.Flags().IntVar(&maxConnections, "max-connections", 100, "Maximum concurrent connections")
+	proxyCmd.Flags().BoolVar(&forwardQuarantine, "forward-quarantine", false, "Relay quarantined mail upstream with a trusted X-MailScript-Quarantine marker")
 
 	addRuntimeFlags(proxyCmd)
 
@@ -96,12 +98,13 @@ func runProxy(cmd *cobra.Command, args []string) error {
 	}
 
 	proxy := &SMTPProxy{
-		script:         string(scriptContent),
-		scriptName:     scriptPath,
-		runtime:        rt,
-		upstreamServer: upstreamServer,
-		maxConnections: maxConnections,
-		connections:    make(map[string]time.Time),
+		script:            string(scriptContent),
+		scriptName:        scriptPath,
+		runtime:           rt,
+		upstreamServer:    upstreamServer,
+		maxConnections:    maxConnections,
+		forwardQuarantine: forwardQuarantine,
+		connections:       make(map[string]time.Time),
 		stats: &ProxyStats{
 			StartTime: time.Now(),
 		},
@@ -161,15 +164,16 @@ func runProxy(cmd *cobra.Command, args []string) error {
 }
 
 type SMTPProxy struct {
-	script         string
-	scriptName     string
-	runtime        *runtime
-	upstreamServer string
-	tlsConfig      *tls.Config
-	maxConnections int
-	connections    map[string]time.Time
-	connMutex      sync.Mutex
-	stats          *ProxyStats
+	script            string
+	scriptName        string
+	runtime           *runtime
+	upstreamServer    string
+	tlsConfig         *tls.Config
+	maxConnections    int
+	forwardQuarantine bool
+	connections       map[string]time.Time
+	connMutex         sync.Mutex
+	stats             *ProxyStats
 }
 
 type ProxyStats struct {
@@ -398,12 +402,15 @@ func (s *SMTPSession) handleDATA() {
 	s.data = []byte(data.String())
 
 	// Process with MailScript
-	accepted, reason := s.processWithMailScript()
+	accepted, quarantined, reason := s.processWithMailScript()
 
 	s.proxy.stats.Lock()
 	s.proxy.stats.MessagesProcessed++
 	s.proxy.stats.BytesProcessed += int64(len(s.data))
 	if accepted {
+		if quarantined {
+			s.data = prependHeader(s.data, "X-MailScript-Quarantine", "true")
+		}
 		s.proxy.stats.MessagesAccepted++
 	} else {
 		s.proxy.stats.MessagesRejected++
@@ -430,7 +437,13 @@ func (s *SMTPSession) handleDATA() {
 	s.data = nil
 }
 
-func (s *SMTPSession) processWithMailScript() (bool, string) {
+func (s *SMTPSession) processWithMailScript() (bool, bool, string) {
+	// This header is a private proxy-to-upstream control signal. A public SMTP
+	// client must never be able to set it and get a message routed to a
+	// quarantine mailbox, so remove any client-supplied copy before parsing or
+	// forwarding. The proxy adds a fresh copy only after its own rule decides.
+	s.data = stripHeader(s.data, "X-MailScript-Quarantine")
+
 	// Parse with the full message parser rather than splitting on colons.
 	// A hand-rolled map would collapse duplicate fields, discard the original
 	// bytes, and skip MIME decoding, which would silently disable duplicate
@@ -438,7 +451,7 @@ func (s *SMTPSession) processWithMailScript() (bool, string) {
 	ctx, err := rules.ParseMessage(s.data)
 	if err != nil {
 		log.Printf("message parse error: %v", err)
-		return false, "Message could not be parsed"
+		return false, false, "Message could not be parsed"
 	}
 
 	// Envelope and connection facts the message itself cannot be trusted for.
@@ -458,27 +471,55 @@ func (s *SMTPSession) processWithMailScript() (bool, string) {
 	// Execute script
 	if err := rules.ExecuteEngineWithOptions(s.proxy.script, ctx, s.proxy.engineOptions()); err != nil {
 		log.Printf("MailScript error: %v", err)
-		return false, "Script execution error"
+		return false, false, "Script execution error"
 	}
+	s.data = applyModifiedHeaders(s.data, ctx.ModifiedHeaders)
 
 	// Check actions
 	for _, action := range ctx.Actions {
 		switch {
 		case action == "discard":
-			return false, "Message discarded by filter"
+			return false, false, "Message discarded by filter"
 		case action == "quarantine":
-			return false, "Message quarantined"
+			if s.proxy.forwardQuarantine {
+				return true, true, ""
+			}
+			return false, false, "Message quarantined"
 		case strings.HasPrefix(action, "fileinto:Spam"):
-			return false, "Classified as spam"
+			return false, false, "Classified as spam"
 		case action == "bounce":
-			return false, "Message bounced"
+			return false, false, "Message bounced"
 		case action == "drop":
-			return false, "Message dropped"
+			return false, false, "Message dropped"
 		}
 	}
 
 	// Default accept
-	return true, ""
+	return true, false, ""
+}
+
+func stripHeader(raw []byte, name string) []byte {
+	lines := strings.SplitAfter(string(raw), "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], name) {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	return []byte(strings.Join(filtered, ""))
+}
+
+func prependHeader(raw []byte, name, value string) []byte {
+	return append([]byte(name+": "+value+"\r\n"), raw...)
+}
+
+func applyModifiedHeaders(raw []byte, headers map[string]string) []byte {
+	for name, value := range headers {
+		raw = prependHeader(raw, name, value)
+	}
+	return raw
 }
 
 func (s *SMTPSession) forwardToUpstream() error {

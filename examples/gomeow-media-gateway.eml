@@ -1,0 +1,16 @@
+From: Gomeow Account <no-reply@gomeow.media>
+To: user@example.net
+Subject: Reset your Gomeow password
+Message-ID: <gomeow-policy-fixture@example.net>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="gomeow-boundary"
+
+--gomeow-boundary
+Content-Type: text/plain; charset=UTF-8
+
+Use the secure password-reset link in this message.
+--gomeow-boundary
+Content-Type: text/html; charset=UTF-8
+
+<html><body><p>Use the secure password-reset link in this message.</p></body></html>
+--gomeow-boundary--
