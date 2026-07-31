@@ -169,6 +169,7 @@ func authPayload(ctx *rules.MessageContext) map[string]interface{} {
 		"spf":           result.SPF.Result,
 		"dkim":          result.DKIM.Result,
 		"dmarc":         result.DMARC.Result,
+		"arc":           result.ARC.Result,
 		"summary":       result.Summary(),
 	}
 	if warnings := result.Warnings(); len(warnings) > 0 {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -473,7 +474,7 @@ func (s *SMTPSession) processWithMailScript() (bool, bool, string) {
 		log.Printf("MailScript error: %v", err)
 		return false, false, "Script execution error"
 	}
-	s.data = applyModifiedHeaders(s.data, ctx.ModifiedHeaders)
+	s.data = applyHeaderChanges(s.data, ctx.RemovedHeaders, ctx.ModifiedHeaders)
 
 	// Check actions
 	for _, action := range ctx.Actions {
@@ -501,9 +502,30 @@ func (s *SMTPSession) processWithMailScript() (bool, bool, string) {
 func stripHeader(raw []byte, name string) []byte {
 	lines := strings.SplitAfter(string(raw), "\n")
 	filtered := make([]string, 0, len(lines))
+	skipping := false
+	inHeaders := true
 	for _, line := range lines {
-		parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
-		if len(parts) == 2 && strings.EqualFold(parts[0], name) {
+		if inHeaders && strings.TrimRight(line, "\r\n") == "" {
+			inHeaders = false
+			skipping = false
+			filtered = append(filtered, line)
+			continue
+		}
+		if !inHeaders {
+			filtered = append(filtered, line)
+			continue
+		}
+		if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+			if skipping {
+				continue
+			}
+			filtered = append(filtered, line)
+			continue
+		}
+		skipping = false
+		parts := strings.SplitN(strings.TrimRight(line, "\r\n"), ":", 2)
+		if len(parts) == 2 && strings.EqualFold(strings.TrimSpace(parts[0]), name) {
+			skipping = true
 			continue
 		}
 		filtered = append(filtered, line)
@@ -520,6 +542,13 @@ func applyModifiedHeaders(raw []byte, headers map[string]string) []byte {
 		raw = prependHeader(raw, name, value)
 	}
 	return raw
+}
+
+func applyHeaderChanges(raw []byte, removed []string, added map[string]string) []byte {
+	for _, name := range removed {
+		raw = stripHeader(raw, name)
+	}
+	return applyModifiedHeaders(raw, added)
 }
 
 func (s *SMTPSession) forwardToUpstream() error {
@@ -583,8 +612,17 @@ func (s *SMTPSession) forwardToUpstream() error {
 	}
 
 	// Send message data
-	conn.Write(s.data)
-	fmt.Fprintf(conn, "\r\n.\r\n")
+	if _, err := conn.Write(dotStuff(s.data)); err != nil {
+		return fmt.Errorf("message write error: %w", err)
+	}
+	if !bytes.HasSuffix(s.data, []byte("\r\n")) {
+		if _, err := fmt.Fprintf(conn, "\r\n"); err != nil {
+			return fmt.Errorf("message terminator error: %w", err)
+		}
+	}
+	if _, err := fmt.Fprintf(conn, ".\r\n"); err != nil {
+		return fmt.Errorf("message terminator error: %w", err)
+	}
 
 	// Wait for response
 	response, err := reader.ReadString('\n')
@@ -601,6 +639,20 @@ func (s *SMTPSession) forwardToUpstream() error {
 
 	log.Printf("Message forwarded successfully to upstream")
 	return nil
+}
+
+func dotStuff(raw []byte) []byte {
+	// SMTP transparency: every data line beginning with a dot gains one dot.
+	out := make([]byte, 0, len(raw)+16)
+	atLineStart := true
+	for _, b := range raw {
+		if atLineStart && b == '.' {
+			out = append(out, '.')
+		}
+		out = append(out, b)
+		atLineStart = b == '\n'
+	}
+	return out
 }
 
 func (s *SMTPSession) handleRSET() {

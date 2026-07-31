@@ -366,6 +366,17 @@ type TLSAResult struct {
 	Error string
 }
 
+// TXTResult is a TXT lookup that preserves DNSSEC authentication state.
+// Secure is only meaningful when the configured resolver is trusted to
+// validate DNSSEC and the query path to it cannot be spoofed.
+type TXTResult struct {
+	Name    string
+	Records []string
+	Secure  bool
+	Found   bool
+	Error   string
+}
+
 // SetNameserverForRaw configures the server used for raw queries such as
 // TLSA. It should be a DNSSEC-validating resolver, since the AD bit is only
 // trustworthy over a secure channel to a validator.
@@ -462,6 +473,64 @@ func (r *Resolver) LookupTLSA(host string, port int) TLSAResult {
 		})
 	}
 
+	r.put(key, result)
+	return result
+}
+
+// LookupTXTAuthenticated queries TXT over the raw DNS path so callers can
+// distinguish a DNSSEC-authenticated policy record from an ordinary answer.
+func (r *Resolver) LookupTXTAuthenticated(name string) TXTResult {
+	name = strings.TrimSuffix(strings.TrimSpace(name), ".")
+	result := TXTResult{Name: name}
+	if r == nil || name == "" {
+		result.Error = "resolver disabled"
+		return result
+	}
+
+	key := "txt-auth:" + strings.ToLower(name)
+	if v, ok := r.get(key); ok {
+		return v.(TXTResult)
+	}
+
+	if r.staticTLSA != nil {
+		r.staticTLSA.record("txt-auth", name)
+		lookupName := strings.ToLower(name)
+		result.Records = append([]string(nil), r.staticTLSA.TXT[lookupName]...)
+		result.Found = len(result.Records) > 0
+		result.Secure = result.Found && r.staticTLSA.SecureTXT[lookupName]
+		r.put(key, result)
+		return result
+	}
+
+	server := r.rawServer
+	if server == "" {
+		server = systemNameserver()
+	}
+	query := new(dns.Msg)
+	query.SetQuestion(dns.Fqdn(name), dns.TypeTXT)
+	query.SetEdns0(4096, true)
+	query.AuthenticatedData = true
+
+	client := &dns.Client{Timeout: r.timeout}
+	response, _, err := client.Exchange(query, server)
+	if err == nil && response.Truncated {
+		client.Net = "tcp"
+		response, _, err = client.Exchange(query, server)
+	}
+	if err != nil {
+		result.Error = err.Error()
+		r.put(key, result)
+		return result
+	}
+	result.Secure = response.AuthenticatedData
+	for _, answer := range response.Answer {
+		txt, ok := answer.(*dns.TXT)
+		if !ok {
+			continue
+		}
+		result.Found = true
+		result.Records = append(result.Records, strings.Join(txt.Txt, ""))
+	}
 	r.put(key, result)
 	return result
 }

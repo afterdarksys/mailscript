@@ -101,6 +101,7 @@ func (e *scriptEnv) verifyBuiltins() starlark.StringDict {
 					"dkim", result.DKIM.Result,
 					"dkim_domains", result.DKIM.PassingDomains,
 					"dmarc", result.DMARC.Result,
+					"arc", result.ARC.Result,
 					"dmarc_aligned_spf", result.DMARC.SPFAligned,
 					"dmarc_aligned_dkim", result.DMARC.DKIMAligned,
 					"summary", result.Summary(),
@@ -121,6 +122,23 @@ func (e *scriptEnv) verifyBuiltins() starlark.StringDict {
 		"verify_spf":   nullaryStr("verify_spf", func() string { return verify(false).SPF.Result }),
 		"verify_dkim":  nullaryStr("verify_dkim", func() string { return verify(false).DKIM.Result }),
 		"verify_dmarc": nullaryStr("verify_dmarc", func() string { return verify(false).DMARC.Result }),
+		"verify_arc":   nullaryStr("verify_arc", func() string { return verify(false).ARC.Result }),
+		"verify_arc_details": nullary("verify_arc_details", func() starlark.Value {
+			arc := verify(false).ARC
+			sets := make([]starlark.Value, 0, len(arc.Sets))
+			for _, set := range arc.Sets {
+				sets = append(sets, dictOf(
+					"instance", set.Instance,
+					"domain", set.Domain,
+					"selector", set.Selector,
+					"cv", set.ChainValidation,
+					"message_signature", set.MessageSignature,
+					"seal", set.Seal,
+					"explanation", set.Explanation,
+				))
+			}
+			return dictOf("result", arc.Result, "sets", starlark.NewList(sets), "explanation", arc.Explanation)
+		}),
 
 		// is_verified is the check most policies want: the sender
 		// cryptographically proved control of the From domain.
@@ -233,6 +251,48 @@ func (e *scriptEnv) verifyBuiltins() starlark.StringDict {
 					"secure_hosts", dane.SecureHosts,
 					"hosts", starlark.NewList(hosts),
 					"explanation", dane.Explanation,
+				), nil
+			}),
+
+		"check_tlsrpt": starlark.NewBuiltin("check_tlsrpt",
+			func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+				var domain string
+				if err := starlark.UnpackArgs("check_tlsrpt", args, kwargs, "domain?", &domain); err != nil {
+					return nil, err
+				}
+				if domain == "" {
+					domain = DomainOf(msg.Get("From"))
+				}
+				policy := authverify.CheckTLSReporting(msg.Resolver, domain)
+				return dictOf(
+					"result", policy.Result,
+					"domain", policy.Domain,
+					"record", policy.Record,
+					"report_uris", policy.ReportURIs,
+					"dnssec_validated", policy.DNSSEC,
+					"explanation", policy.Explanation,
+				), nil
+			}),
+
+		"check_mta_sts": starlark.NewBuiltin("check_mta_sts",
+			func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+				var domain string
+				if err := starlark.UnpackArgs("check_mta_sts", args, kwargs, "domain?", &domain); err != nil {
+					return nil, err
+				}
+				if domain == "" {
+					domain = DomainOf(msg.Get("From"))
+				}
+				policy := authverify.CheckMTASTS(msg.Resolver, domain, nil)
+				return dictOf(
+					"result", policy.Result,
+					"domain", policy.Domain,
+					"id", policy.ID,
+					"mode", policy.Mode,
+					"mx", policy.MX,
+					"max_age", policy.MaxAge,
+					"dnssec_validated", policy.DNSSEC,
+					"explanation", policy.Explanation,
 				), nil
 			}),
 

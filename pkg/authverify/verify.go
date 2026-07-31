@@ -43,6 +43,7 @@ type Result struct {
 	DKIM  DKIMResult
 	DMARC DMARCResult
 	DANE  *DANEDomainResult
+	ARC   ARCResult
 
 	// FromDomain is the identity DMARC was evaluated for.
 	FromDomain string
@@ -90,6 +91,7 @@ func Verify(resolver *dnsx.Resolver, input Input) *Result {
 	}
 
 	result.DKIM = VerifyDKIM(resolver, input.Headers, input.Body, now)
+	result.ARC = VerifyARC(resolver, input.Headers, input.Body, now)
 
 	result.DMARC = VerifyDMARC(resolver, fromDomain, result.SPF, result.DKIM)
 	result.Authenticated = result.DMARC.Result == DMARCPass
@@ -137,6 +139,9 @@ func (r *Result) AuthenticationResults(authservID string) string {
 		dmarc += fmt.Sprintf(" header.from=%s", r.FromDomain)
 	}
 	parts = append(parts, dmarc)
+	if r.ARC.Result != "none" && r.ARC.Result != "" {
+		parts = append(parts, fmt.Sprintf("arc=%s", r.ARC.Result))
+	}
 
 	if r.DANE != nil {
 		parts = append(parts, fmt.Sprintf("dane=%s", r.DANE.Result))
@@ -151,8 +156,8 @@ func (r *Result) Summary() string {
 	if r.Authenticated {
 		verdict = "authenticated"
 	}
-	base := fmt.Sprintf("%s (spf=%s dkim=%s dmarc=%s",
-		verdict, r.SPF.Result, r.DKIM.Result, r.DMARC.Result)
+	base := fmt.Sprintf("%s (spf=%s dkim=%s dmarc=%s arc=%s",
+		verdict, r.SPF.Result, r.DKIM.Result, r.DMARC.Result, r.ARC.Result)
 	if r.DANE != nil {
 		base += " dane=" + r.DANE.Result
 	}

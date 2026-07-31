@@ -33,6 +33,9 @@ type Analyzer struct {
 	Stopwords   map[string]bool
 	MaxTokens   int  // 0 means unlimited
 	KeepNumbers bool // when false, numbers collapse to a NUM placeholder
+	// OSBWindow emits orthogonal sparse-bigram features up to this distance.
+	// Zero disables them; 5 is a practical order-sensitive spam setting.
+	OSBWindow int
 }
 
 // DefaultAnalyzer returns the analyzer used when a model does not specify one.
@@ -157,7 +160,26 @@ func (a *Analyzer) Analyze(text string) []string {
 		}
 	}
 
-	return a.expandNGrams(unigrams)
+	out := a.expandNGrams(unigrams)
+	if a.OSBWindow > 1 {
+		for i := 0; i < len(unigrams); i++ {
+			end := i + a.OSBWindow
+			if end >= len(unigrams) {
+				end = len(unigrams) - 1
+			}
+			for j := i + 1; j <= end; j++ {
+				out = append(out, unigrams[i]+"~"+string(rune('0'+minIntML(j-i, 9)))+"~"+unigrams[j])
+			}
+		}
+	}
+	return out
+}
+
+func minIntML(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // expandNGrams emits the configured range of n-grams over a unigram sequence.

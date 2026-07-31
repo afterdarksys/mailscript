@@ -15,6 +15,15 @@ import (
 	"github.com/afterdarksys/mailscript/pkg/dnsx"
 )
 
+func TestStrictDKIMTagsRejectUppercaseAndDuplicates(t *testing.T) {
+	if _, err := parseStrictDKIMTags("v=1; B=bad; b=good"); err == nil {
+		t.Fatal("uppercase tag name must be rejected")
+	}
+	if _, err := parseStrictDKIMTags("v=1; b=one; b=two"); err == nil {
+		t.Fatal("duplicate tag must be rejected")
+	}
+}
+
 // signer builds DKIM-signed messages for tests. It mirrors what a real
 // signing MTA does, so the verifier is exercised against genuine signatures
 // rather than fixtures that could drift from the implementation.
@@ -90,7 +99,7 @@ func (s *signer) sign(t *testing.T, headers [][2]string, body []byte, extraTags 
 
 	// Build the signed header set exactly as the verifier will.
 	withSig := append(append([][2]string{}, headers...), [2]string{"DKIM-Signature", sigValue})
-	input := buildSignedHeaderInput(withSig, len(withSig)-1, names, sigValue, s.headerCan)
+	input := buildSignedHeaderInput(withSig, len(withSig)-1, names, sigValue, s.headerCan, "DKIM-Signature")
 	digest := sha256.Sum256(input)
 
 	var signature []byte

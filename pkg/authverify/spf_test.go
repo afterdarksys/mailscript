@@ -15,6 +15,27 @@ func spfResolver(setup func(*dnsx.StaticBackend)) (*dnsx.Resolver, *dnsx.StaticB
 	return dnsx.NewTestResolver(backend), backend
 }
 
+func TestSPFExpandsSenderDomainAndIPMacros(t *testing.T) {
+	resolver, _ := spfResolver(func(b *dnsx.StaticBackend) {
+		b.AddTXT("example.com", "v=spf1 exists:%{i}.%{d} -all")
+		b.AddHost("192.0.2.10.example.com", "127.0.0.1")
+	})
+	got := VerifySPF(resolver, "192.0.2.10", "alice@example.com", "mail.example.com")
+	if got.Result != SPFPass {
+		t.Fatalf("expected macro-expanded pass, got %s (%s)", got.Result, got.Explanation)
+	}
+}
+
+func TestSPFUnsupportedMacroIsPermError(t *testing.T) {
+	resolver, _ := spfResolver(func(b *dnsx.StaticBackend) {
+		b.AddTXT("example.com", "v=spf1 exists:%{p}.example.com -all")
+	})
+	got := VerifySPF(resolver, "192.0.2.10", "alice@example.com", "mail.example.com")
+	if got.Result != SPFPermError || !strings.Contains(got.Explanation, "unsupported SPF macro") {
+		t.Fatalf("expected explicit permerror, got %+v", got)
+	}
+}
+
 func TestSPFPassOnIP4Mechanism(t *testing.T) {
 	resolver, _ := spfResolver(func(b *dnsx.StaticBackend) {
 		b.AddTXT("example.com", "v=spf1 ip4:192.0.2.0/24 -all")

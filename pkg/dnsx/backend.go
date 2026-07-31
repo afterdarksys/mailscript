@@ -92,8 +92,11 @@ type StaticBackend struct {
 	Hosts map[string][]string
 	MX    map[string][]string
 	TXT   map[string][]string
-	PTR   map[string][]string
-	TLSA  map[string]TLSAResult
+	// SecureTXT marks TXT owner names whose synthetic answer is DNSSEC
+	// authenticated. It is consumed by LookupTXTAuthenticated in tests.
+	SecureTXT map[string]bool
+	PTR       map[string][]string
+	TLSA      map[string]TLSAResult
 
 	// Queries counts lookups by type and name, so a test can assert that the
 	// SPF lookup limit actually stopped the traversal.
@@ -103,11 +106,12 @@ type StaticBackend struct {
 // NewStaticBackend returns an empty in-memory backend.
 func NewStaticBackend() *StaticBackend {
 	return &StaticBackend{
-		Hosts: map[string][]string{},
-		MX:    map[string][]string{},
-		TXT:   map[string][]string{},
-		PTR:   map[string][]string{},
-		TLSA:  map[string]TLSAResult{},
+		Hosts:     map[string][]string{},
+		MX:        map[string][]string{},
+		TXT:       map[string][]string{},
+		SecureTXT: map[string]bool{},
+		PTR:       map[string][]string{},
+		TLSA:      map[string]TLSAResult{},
 	}
 }
 
@@ -165,6 +169,14 @@ func (s *StaticBackend) AddMX(domain string, hosts ...string) *StaticBackend {
 // AddTXT registers TXT answers.
 func (s *StaticBackend) AddTXT(name string, records ...string) *StaticBackend {
 	s.TXT[strings.ToLower(name)] = records
+	return s
+}
+
+// AddSecureTXT registers a TXT answer with the DNSSEC Authenticated Data bit.
+func (s *StaticBackend) AddSecureTXT(name string, records ...string) *StaticBackend {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	s.TXT[name] = records
+	s.SecureTXT[name] = true
 	return s
 }
 

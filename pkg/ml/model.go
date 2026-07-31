@@ -14,7 +14,7 @@ import (
 
 // ModelFormatVersion is incremented when the serialised layout changes in a
 // way older binaries cannot read.
-const ModelFormatVersion = 1
+const ModelFormatVersion = 2
 
 // Model bundles a vectorizer and a classifier into the single artefact a rule
 // script loads.
@@ -27,6 +27,10 @@ type Model struct {
 
 	Vectorizer *Vectorizer `json:"vectorizer"`
 	Classifier *NaiveBayes `json:"classifier"`
+	// Scorer selects bayes, robinson, or fisher. Older models omit it and
+	// continue to use bayes.
+	Scorer     string      `json:"scorer,omitempty"`
+	TokenStore *TokenStore `json:"token_store,omitempty"`
 
 	// Metrics records how the model scored on held-out data at training time.
 	Metrics *EvalMetrics `json:"metrics,omitempty"`
@@ -52,19 +56,23 @@ type TrainOptions struct {
 	// Zero skips evaluation and trains on everything.
 	HoldoutRatio float64
 	// Seed makes the holdout split reproducible.
-	Seed int64
+	Seed             int64
+	Scorer           string
+	FeatureSelection string
 }
 
 // DefaultTrainOptions returns options suited to a spam or ham corpus.
 func DefaultTrainOptions() TrainOptions {
 	return TrainOptions{
-		Name:         "mailscript-classifier",
-		Alpha:        1.0,
-		MinDF:        2,
-		MaxDFRatio:   0.95,
-		MaxFeatures:  50000,
-		HoldoutRatio: 0.2,
-		Seed:         42,
+		Name:             "mailscript-classifier",
+		Alpha:            1.0,
+		MinDF:            2,
+		MaxDFRatio:       0.95,
+		MaxFeatures:      50000,
+		HoldoutRatio:     0.2,
+		Seed:             42,
+		Scorer:           "fisher",
+		FeatureSelection: "chi2",
 	}
 }
 
@@ -76,6 +84,18 @@ func Train(docs []LabeledDoc, opts TrainOptions) (*Model, error) {
 	if opts.Alpha <= 0 {
 		opts.Alpha = 1.0
 	}
+	if opts.Scorer == "" {
+		opts.Scorer = "fisher"
+	}
+	if opts.Scorer != "bayes" && opts.Scorer != "robinson" && opts.Scorer != "fisher" {
+		return nil, fmt.Errorf("ml: unknown scorer %q (want bayes, robinson, or fisher)", opts.Scorer)
+	}
+	if opts.FeatureSelection == "" {
+		opts.FeatureSelection = "chi2"
+	}
+	if opts.FeatureSelection != "chi2" && opts.FeatureSelection != "frequency" {
+		return nil, fmt.Errorf("ml: unknown feature selection %q (want chi2 or frequency)", opts.FeatureSelection)
+	}
 
 	classSet := map[string]bool{}
 	for _, d := range docs {
@@ -86,6 +106,9 @@ func Train(docs []LabeledDoc, opts TrainOptions) (*Model, error) {
 	}
 	if len(classSet) < 2 {
 		return nil, fmt.Errorf("ml: corpus has only %d class; at least two are required", len(classSet))
+	}
+	if len(classSet) != 2 && opts.Scorer != "bayes" {
+		return nil, fmt.Errorf("ml: %s scorer is binary; use scorer=bayes for %d classes", opts.Scorer, len(classSet))
 	}
 
 	classes := make([]string, 0, len(classSet))
@@ -113,6 +136,9 @@ func Train(docs []LabeledDoc, opts TrainOptions) (*Model, error) {
 		vec.MinDF = opts.MinDF
 		vec.MaxDFRatio = opts.MaxDFRatio
 		vec.MaxFeatures = opts.MaxFeatures
+		if opts.FeatureSelection == "chi2" {
+			vec.MaxFeatures = 0 // rank the full filtered vocabulary by class dependence below
+		}
 	}
 	if opts.Analyzer != nil {
 		vec.Analyzer = opts.Analyzer
@@ -123,6 +149,9 @@ func Train(docs []LabeledDoc, opts TrainOptions) (*Model, error) {
 		corpus[i] = d.Text
 	}
 	vec.Fit(corpus)
+	if opts.FeatureSelection == "chi2" && opts.HashDim == 0 && opts.MaxFeatures > 0 {
+		selectChiSquareFeatures(vec, train, classes, opts.MaxFeatures)
+	}
 
 	if vec.NumFeatures() == 0 {
 		return nil, errors.New("ml: vocabulary is empty after filtering; lower min_df or supply more data")
@@ -147,6 +176,20 @@ func Train(docs []LabeledDoc, opts TrainOptions) (*Model, error) {
 		Classes:       classes,
 		Vectorizer:    vec,
 		Classifier:    nb,
+		Scorer:        opts.Scorer,
+	}
+	if model.Scorer == "" {
+		model.Scorer = "fisher"
+	}
+	if model.Scorer != "bayes" {
+		store, err := NewTokenStore(classes)
+		if err != nil {
+			return nil, err
+		}
+		if err := store.Fit(train, vec.Analyzer); err != nil {
+			return nil, err
+		}
+		model.TokenStore = store
 	}
 
 	if len(holdout) > 0 {
@@ -202,6 +245,18 @@ func (m *Model) Classify(text string) (Prediction, error) {
 	if m == nil || m.Vectorizer == nil || m.Classifier == nil {
 		return Prediction{}, ErrNotTrained
 	}
+	if m.Scorer == "robinson" || m.Scorer == "fisher" {
+		if m.TokenStore == nil {
+			return Prediction{}, ErrNotTrained
+		}
+		score, _ := m.TokenStore.Score(text, m.Scorer, m.Vectorizer.Analyzer)
+		probs := map[string]float64{m.Classes[0]: 1 - score, m.Classes[1]: score}
+		label, confidence := m.Classes[1], score
+		if score < 0.5 {
+			label, confidence = m.Classes[0], 1-score
+		}
+		return Prediction{Label: label, Confidence: confidence, Probabilities: probs}, nil
+	}
 	return m.Classifier.Predict(m.Vectorizer.Transform(text))
 }
 
@@ -210,7 +265,35 @@ func (m *Model) ScoreFor(text, class string) (float64, error) {
 	if m == nil || m.Vectorizer == nil || m.Classifier == nil {
 		return 0, ErrNotTrained
 	}
+	if m.Scorer == "robinson" || m.Scorer == "fisher" {
+		if m.TokenStore == nil {
+			return 0, ErrNotTrained
+		}
+		score, _ := m.TokenStore.Score(text, m.Scorer, m.Vectorizer.Analyzer)
+		if class == m.Classes[1] {
+			return score, nil
+		}
+		if class == m.Classes[0] {
+			return 1 - score, nil
+		}
+		return 0, nil
+	}
 	return m.Classifier.ProbabilityOf(m.Vectorizer.Transform(text), class)
+}
+
+func (m *Model) Unsure(text string) bool {
+	if m == nil || m.TokenStore == nil {
+		return false
+	}
+	_, unsure := m.TokenStore.Score(text, m.Scorer, m.Vectorizer.Analyzer)
+	return unsure
+}
+
+func (m *Model) ScorerName() string {
+	if m == nil || m.Scorer == "" {
+		return "bayes"
+	}
+	return m.Scorer
 }
 
 // Explain returns the terms in a document that most influenced its

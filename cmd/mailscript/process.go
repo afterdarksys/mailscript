@@ -289,7 +289,9 @@ func processMessage(msgNum int, raw []byte, script string) ProcessResult {
 	}
 
 	// Execute script
-	if err := rules.ExecuteEngine(script, ctx); err != nil {
+	opts := rules.DefaultOptions()
+	opts.Filename = scriptPath
+	if err := rules.ExecuteEngineWithOptions(script, ctx, opts); err != nil {
 		result.Error = fmt.Sprintf("execution error: %v", err)
 		return result
 	}

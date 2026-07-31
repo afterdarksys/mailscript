@@ -74,6 +74,7 @@ type MessageContext struct {
 	SenderDID       string
 	Actions         []string          // actions taken by the script, in order
 	ModifiedHeaders map[string]string // headers added or modified by the script
+	RemovedHeaders  []string          // headers removed by policy, case-insensitively
 	BodySize        int64             // size of the body in bytes
 	HeaderSize      int64             // size of the header block in bytes
 	EnvelopeSenders []string          // SMTP envelope senders
@@ -152,6 +153,20 @@ type MessageContext struct {
 	// authResults caches parsed authentication results.
 	auth       *AuthResults
 	authParsed bool
+}
+
+// RemoveHeader records a case-insensitive header removal once.
+func (m *MessageContext) RemoveHeader(name string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	for _, existing := range m.RemovedHeaders {
+		if strings.EqualFold(existing, name) {
+			return
+		}
+	}
+	m.RemovedHeaders = append(m.RemovedHeaders, name)
 }
 
 // MIMEPart is a flattened view of one part of the MIME tree.

@@ -301,7 +301,9 @@ func runScript(script string, ctx *rules.MessageContext) {
 	}
 
 	// Execute
-	if err := rules.ExecuteEngine(script, ctx); err != nil {
+	opts := rules.DefaultOptions()
+	opts.Filename = scriptPath
+	if err := rules.ExecuteEngineWithOptions(script, ctx, opts); err != nil {
 		fmt.Printf("Script error: %v\n", err)
 		return
 	}

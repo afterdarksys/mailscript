@@ -42,17 +42,20 @@ Examples:
 }
 
 var (
-	trainSpam      []string
-	trainHam       []string
-	trainLabels    []string
-	trainOut       string
-	trainHoldout   float64
-	trainMinDF     int
-	trainMaxFeat   int
-	trainNGramMax  int
-	trainAlpha     float64
-	trainHashDim   int
-	trainMaxPerSet int
+	trainSpam             []string
+	trainHam              []string
+	trainLabels           []string
+	trainOut              string
+	trainHoldout          float64
+	trainMinDF            int
+	trainMaxFeat          int
+	trainNGramMax         int
+	trainAlpha            float64
+	trainHashDim          int
+	trainMaxPerSet        int
+	trainScorer           string
+	trainFeatureSelection string
+	trainOSBWindow        int
 )
 
 func init() {
@@ -70,6 +73,9 @@ func init() {
 	f.Float64Var(&trainAlpha, "alpha", 1.0, "Additive smoothing parameter")
 	f.IntVar(&trainHashDim, "hash-dim", 0, "Use the hashing trick with this many buckets instead of a vocabulary")
 	f.IntVar(&trainMaxPerSet, "max-per-corpus", 0, "Cap messages read from each corpus (0 = all)")
+	f.StringVar(&trainScorer, "scorer", "fisher", "Classifier scorer: fisher, robinson, or bayes")
+	f.StringVar(&trainFeatureSelection, "feature-selection", "chi2", "Feature ranking: chi2 or frequency")
+	f.IntVar(&trainOSBWindow, "osb-window", 0, "Emit order-sensitive sparse bigrams up to this token distance (0 disables)")
 }
 
 func runTrain(cmd *cobra.Command, args []string) error {
@@ -120,18 +126,21 @@ func runTrain(cmd *cobra.Command, args []string) error {
 
 	analyzer := ml.DefaultAnalyzer()
 	analyzer.NGramMax = trainNGramMax
+	analyzer.OSBWindow = trainOSBWindow
 
 	opts := ml.TrainOptions{
-		Name:         strings.TrimSuffix(filepath.Base(trainOut), filepath.Ext(trainOut)),
-		Description:  fmt.Sprintf("trained from %d messages across %d classes", len(docs), len(labels)),
-		Analyzer:     analyzer,
-		Alpha:        trainAlpha,
-		MinDF:        trainMinDF,
-		MaxDFRatio:   0.95,
-		MaxFeatures:  trainMaxFeat,
-		HashDim:      trainHashDim,
-		HoldoutRatio: trainHoldout,
-		Seed:         42,
+		Name:             strings.TrimSuffix(filepath.Base(trainOut), filepath.Ext(trainOut)),
+		Description:      fmt.Sprintf("trained from %d messages across %d classes", len(docs), len(labels)),
+		Analyzer:         analyzer,
+		Alpha:            trainAlpha,
+		MinDF:            trainMinDF,
+		MaxDFRatio:       0.95,
+		MaxFeatures:      trainMaxFeat,
+		HashDim:          trainHashDim,
+		HoldoutRatio:     trainHoldout,
+		Seed:             42,
+		Scorer:           trainScorer,
+		FeatureSelection: trainFeatureSelection,
 	}
 
 	model, err := ml.Train(docs, opts)

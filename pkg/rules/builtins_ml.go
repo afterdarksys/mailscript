@@ -75,6 +75,35 @@ func (e *scriptEnv) mlBuiltins() starlark.StringDict {
 
 		"golearn_available": nullaryBool("golearn_available", ml.GoLearnAvailable),
 
+		"ml_scorer": starlark.NewBuiltin("ml_scorer",
+			func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+				var modelName string
+				if err := starlark.UnpackArgs("ml_scorer", args, kwargs, "model?", &modelName); err != nil {
+					return nil, err
+				}
+				model, err := e.resolveModel(modelName)
+				if err != nil {
+					return nil, fmt.Errorf("ml_scorer: %w", err)
+				}
+				return starlark.String(model.ScorerName()), nil
+			}),
+
+		"ml_unsure": starlark.NewBuiltin("ml_unsure",
+			func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+				var modelName, text string
+				if err := starlark.UnpackArgs("ml_unsure", args, kwargs, "model?", &modelName, "text?", &text); err != nil {
+					return nil, err
+				}
+				model, err := e.resolveModel(modelName)
+				if err != nil {
+					return nil, fmt.Errorf("ml_unsure: %w", err)
+				}
+				if text == "" {
+					text = e.classifierText()
+				}
+				return starlark.Bool(model.Unsure(text)), nil
+			}),
+
 		// classify returns the predicted label and full distribution.
 		"classify": starlark.NewBuiltin("classify",
 			func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

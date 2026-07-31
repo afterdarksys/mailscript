@@ -145,7 +145,9 @@ func runDaemonTest(cmd *cobra.Command, args []string) error {
 		ctx := buildContextFromDaemonMessage(msg)
 
 		// Execute script
-		if err := rules.ExecuteEngine(string(scriptContent), ctx); err != nil {
+		opts := rules.DefaultOptions()
+		opts.Filename = scriptPath
+		if err := rules.ExecuteEngineWithOptions(string(scriptContent), ctx, opts); err != nil {
 			fmt.Printf("[%d] Error: %v\n", i+1, err)
 			continue
 		}
@@ -208,7 +210,9 @@ func runDaemonMonitor(cmd *cobra.Command, args []string) error {
 				msg := messages[i]
 				ctx := buildContextFromDaemonMessage(msg)
 
-				if err := rules.ExecuteEngine(string(scriptContent), ctx); err != nil {
+				opts := rules.DefaultOptions()
+				opts.Filename = scriptPath
+				if err := rules.ExecuteEngineWithOptions(string(scriptContent), ctx, opts); err != nil {
 					fmt.Printf("Error processing message: %v\n", err)
 					continue
 				}

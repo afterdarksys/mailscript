@@ -15,6 +15,7 @@ import (
 // DANE result values.
 const (
 	DANENone      = "none"      // no TLSA records published
+	DANEAvailable = "available" // validated TLSA records found; no certificate checked
 	DANEPass      = "pass"      // a presented certificate matched a TLSA record
 	DANEFail      = "fail"      // TLSA records exist but nothing matched
 	DANEInsecure  = "insecure"  // TLSA records exist but the DNSSEC chain was not validated
@@ -124,7 +125,7 @@ func CheckDANE(resolver *dnsx.Resolver, host string, port int) DANEResult {
 		return result
 	}
 
-	result.Result = DANEPass
+	result.Result = DANEAvailable
 	result.Explanation = fmt.Sprintf(
 		"%d usable DNSSEC-validated TLSA record(s) at %s", result.UsableRecords, lookup.Name)
 	return result
@@ -149,17 +150,26 @@ func CheckDANEDomain(resolver *dnsx.Resolver, domain string) DANEDomainResult {
 		return result
 	}
 
+	insecureHosts, tempErrors, permErrors := 0, 0, 0
 	for _, host := range hosts {
 		hostResult := CheckDANE(resolver, host, 25)
 		result.Hosts = append(result.Hosts, hostResult)
-		if hostResult.Result == DANEPass {
+		if hostResult.Result == DANEAvailable {
 			result.SecureHosts++
+		}
+		switch hostResult.Result {
+		case DANEInsecure:
+			insecureHosts++
+		case DANETempError:
+			tempErrors++
+		case DANEPermError:
+			permErrors++
 		}
 	}
 
 	switch {
 	case result.SecureHosts == len(hosts):
-		result.Result = DANEPass
+		result.Result = DANEAvailable
 		result.Explanation = fmt.Sprintf("all %d MX host(s) publish validated TLSA records", len(hosts))
 	case result.SecureHosts > 0:
 		// Partial deployment is a downgrade opportunity: an attacker steers
@@ -168,6 +178,15 @@ func CheckDANEDomain(resolver *dnsx.Resolver, domain string) DANEDomainResult {
 		result.Explanation = fmt.Sprintf(
 			"only %d of %d MX host(s) publish validated TLSA records, so delivery can be downgraded",
 			result.SecureHosts, len(hosts))
+	case insecureHosts > 0:
+		result.Result = DANEInsecure
+		result.Explanation = fmt.Sprintf("%d MX host(s) publish TLSA records that were not DNSSEC-validated", insecureHosts)
+	case tempErrors > 0:
+		result.Result = DANETempError
+		result.Explanation = fmt.Sprintf("TLSA lookup failed for %d of %d MX host(s)", tempErrors, len(hosts))
+	case permErrors > 0:
+		result.Result = DANEPermError
+		result.Explanation = fmt.Sprintf("%d MX host(s) publish unusable TLSA records", permErrors)
 	default:
 		result.Result = DANENone
 		result.Explanation = fmt.Sprintf("none of the %d MX host(s) publish usable TLSA records", len(hosts))
@@ -184,7 +203,7 @@ func CheckDANEDomain(resolver *dnsx.Resolver, domain string) DANEDomainResult {
 // leaf first.
 func VerifyDANECertificate(resolver *dnsx.Resolver, host string, port int, chain []*x509.Certificate) DANEResult {
 	result := CheckDANE(resolver, host, port)
-	if result.Result != DANEPass {
+	if result.Result != DANEAvailable {
 		return result
 	}
 	if len(chain) == 0 {

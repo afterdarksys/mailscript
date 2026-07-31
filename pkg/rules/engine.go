@@ -2,6 +2,8 @@ package rules
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -85,6 +87,53 @@ func ExecuteEngineWithOptions(scriptSource string, msg *MessageContext, opts Opt
 			}
 			msg.LogEntries = append(msg.LogEntries, text)
 		},
+	}
+	// load("relative.star", ...) lets an administrator split a policy into
+	// small typed modules. Loads are confined to the directory containing the
+	// root script, cached, and cycle-checked.
+	if filepath.IsAbs(opts.Filename) || strings.Contains(opts.Filename, string(filepath.Separator)) {
+		root, err := filepath.Abs(filepath.Dir(opts.Filename))
+		if err != nil {
+			return fmt.Errorf("resolve script directory: %w", err)
+		}
+		if resolvedRoot, resolveErr := filepath.EvalSymlinks(root); resolveErr == nil {
+			root = resolvedRoot
+		}
+		cache := map[string]starlark.StringDict{}
+		loading := map[string]bool{}
+		thread.Load = func(loadThread *starlark.Thread, module string) (starlark.StringDict, error) {
+			if filepath.IsAbs(module) || filepath.Ext(module) != ".star" {
+				return nil, fmt.Errorf("load: module must be a relative .star path")
+			}
+			path, err := filepath.Abs(filepath.Join(root, filepath.Clean(module)))
+			if err == nil {
+				path, err = filepath.EvalSymlinks(path)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("load %q: %w", module, err)
+			}
+			if path != root && !strings.HasPrefix(path, root+string(filepath.Separator)) {
+				return nil, fmt.Errorf("load: module %q escapes policy directory", module)
+			}
+			if globals, ok := cache[path]; ok {
+				return globals, nil
+			}
+			if loading[path] {
+				return nil, fmt.Errorf("load cycle involving %q", module)
+			}
+			loading[path] = true
+			defer delete(loading, path)
+			source, err := os.ReadFile(path)
+			if err != nil {
+				return nil, fmt.Errorf("load %q: %w", module, err)
+			}
+			globals, err := starlark.ExecFile(loadThread, path, source, predeclared)
+			if err != nil {
+				return nil, err
+			}
+			cache[path] = globals
+			return globals, nil
+		}
 	}
 	thread.SetMaxExecutionSteps(opts.MaxSteps)
 
@@ -566,9 +615,47 @@ func (e *scriptEnv) headerBuiltins() starlark.StringDict {
 		}),
 
 		"remove_header": unary("remove_header", "name", func(name string) starlark.Value {
+			msg.RemoveHeader(name)
 			msg.Actions = append(msg.Actions, "remove_header:"+name)
 			return starlark.None
 		}),
+
+		// protect_metadata applies a named privacy policy at the point a rule
+		// decides the message is leaving a trust boundary. It intentionally
+		// records removals instead of mutating the parsed message, so earlier
+		// cryptographic checks continue to see the original wire bytes.
+		"protect_metadata": starlark.NewBuiltin("protect_metadata",
+			func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+				policy := "standard"
+				var extra starlark.Value = starlark.None
+				if err := starlark.UnpackArgs("protect_metadata", args, kwargs, "policy?", &policy, "extra?", &extra); err != nil {
+					return nil, err
+				}
+				policies := map[string][]string{
+					"minimal":  {"X-Originating-IP", "X-Client-IP", "X-Sender-IP", "X-Remote-IP"},
+					"standard": {"X-Originating-IP", "X-Client-IP", "X-Sender-IP", "X-Remote-IP", "X-Envelope-From", "X-Envelope-To", "X-Original-To", "X-Authenticated-User", "X-Auth-User"},
+					"strict":   {"X-Originating-IP", "X-Client-IP", "X-Sender-IP", "X-Remote-IP", "X-Envelope-From", "X-Envelope-To", "X-Original-To", "X-Authenticated-User", "X-Auth-User", "Received", "Return-Path", "Delivered-To"},
+				}
+				names, ok := policies[strings.ToLower(strings.TrimSpace(policy))]
+				if !ok {
+					return nil, fmt.Errorf("protect_metadata: unknown policy %q (want minimal, standard, or strict)", policy)
+				}
+				if extra != starlark.None {
+					values, err := stringsFromValue(extra)
+					if err != nil {
+						return nil, fmt.Errorf("protect_metadata: extra: %w", err)
+					}
+					names = append(names, values...)
+				}
+				for _, name := range names {
+					if strings.ContainsAny(name, "\r\n:\x00") {
+						return nil, fmt.Errorf("protect_metadata: invalid header name %q", name)
+					}
+					msg.RemoveHeader(name)
+				}
+				msg.Actions = append(msg.Actions, "protect_metadata:"+strings.ToLower(policy))
+				return starlark.MakeInt(len(msg.RemovedHeaders)), nil
+			}),
 
 		"header_size":  nullary("header_size", func() starlark.Value { return starlark.MakeInt64(msg.HeaderSize) }),
 		"num_envelope": nullaryInt("num_envelope", func() int { return len(msg.EnvelopeSenders) }),

@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package mailscript;
 
-option go_package = "github.com/afterdarksys/aftermail/pkg/proto";
+option go_package = "github.com/afterdarksys/mailscript/pkg/proto;mailscriptpb";
 
 // MailScript gRPC service for programmatic message processing
 service MailScriptService {

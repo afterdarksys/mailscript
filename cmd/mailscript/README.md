@@ -2,6 +2,11 @@
 
 Powerful Starlark-based email filtering that runs anywhere. Test offline, process mailboxes, or run as an SMTP proxy gateway.
 
+MailScript can locally verify SPF, DKIM, DMARC, ARC, and DANE; inspect
+DNSSEC-aware transport policy; minimize metadata at a trust boundary; and
+route explicitly AI-generated mail. See the repository `README.md` and
+`SPEC.md` for the security model and complete 253-builtin reference.
+
 ## Commands
 
 ### `mailscript test` - Offline Rule Testing
@@ -64,6 +69,10 @@ mailscript proxy --script=filter.star
 # With upstream forwarding
 mailscript proxy --script=filter.star --upstream=mail.example.com:25
 
+# Compose typed policy modules from one root policy
+mailscript proxy --script=examples/policy-bundle.star \
+  --dns --upstream=mail.example.com:25
+
 # Enable TLS
 mailscript proxy --script=filter.star --enable-tls --cert=cert.pem --key=key.pem
 
@@ -92,7 +101,7 @@ mailscript proxy --script=filter.star --port=3025,3465,3587
 1. **Filter ALL Incoming Mail**: Sit in front of your mail server
 2. **Re-inject to Upstream**: Apply rules, modify headers, forward to real server
 3. **gRPC Integration**: Non-mail apps can submit messages via gRPC (port 50051)
-4. **TLS/STARTTLS**: Full encryption support
+4. **Inbound TLS/STARTTLS**: Protect client-to-proxy SMTP sessions
 5. **Real-time Processing**: Filter messages as they flow through
 6. **Metrics & Stats**: Track what's being filtered
 
@@ -116,10 +125,18 @@ service MailScriptService {
     // Get proxy statistics
     rpc GetStats(StatsRequest) returns (StatsResponse);
 
+    // Service readiness and build identity
+    rpc Health(HealthRequest) returns (HealthResponse);
+
     // Stream processing for high throughput
     rpc ProcessMessageStream(stream ProcessRequest) returns (stream ProcessResponse);
 }
 ```
+
+The generated Go bindings are checked into `pkg/proto`; the server is
+registered and served by the proxy. When `forward_to_upstream` is true, a
+successful response means the upstream SMTP transaction completed. Missing
+upstream configuration and SMTP failures are returned as rejected responses.
 
 This means:
 - Web apps can validate emails before sending
@@ -129,6 +146,47 @@ This means:
 - **Literally ANYTHING can use MailScript filtering**
 
 ## Integration Examples
+
+### Split Policy by Responsibility
+
+The root script controls order and terminal decisions while modules contain
+one policy concern each:
+
+```python
+load("policies/authentication.star", "apply_authentication")
+load("policies/content.star", "apply_content_safety")
+load("policies/ai-mail.star", "apply_ai_policy")
+load("policies/privacy.star", "apply_privacy")
+
+def evaluate():
+    apply_authentication()
+    if apply_content_safety() or apply_ai_policy():
+        return
+    apply_privacy()
+    accept()
+```
+
+Loaded paths are relative to the root script, must end in `.star`, and cannot
+escape the root policy directory, including through symlinks.
+
+### Transport and Path Integrity
+
+```python
+def evaluate():
+    if verify_arc() not in ("none", "pass"):
+        quarantine()
+        return
+
+    sts = check_mta_sts(from_domain())
+    tlsrpt = check_tlsrpt(from_domain())
+    log_entry("mta-sts=" + sts["result"] + " tls-rpt=" + tlsrpt["result"])
+
+    protect_metadata("standard", extra=["X-Internal-Trace"])
+    accept()
+```
+
+DANE and MTA-STS describe delivery *to* a domain; they do not authenticate a
+message received *from* that domain. ARC verifies intermediary path integrity.
 
 ### Corporate Mail Gateway
 ```bash
@@ -183,8 +241,11 @@ else:
 # Build standalone binary
 go build -o mailscript ./cmd/mailscript
 
-# Generate gRPC code (optional, for full gRPC support)
-protoc --go_out=. --go-grpc_out=. pkg/proto/mailscript.proto
+# Regenerate the checked-in Go bindings after editing the proto
+protoc \
+  --go_out=. --go_opt=module=github.com/afterdarksys/mailscript \
+  --go-grpc_out=. --go-grpc_opt=module=github.com/afterdarksys/mailscript \
+  pkg/proto/mailscript.proto
 ```
 
 ## Why This Matters

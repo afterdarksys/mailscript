@@ -1,10 +1,30 @@
 package rules
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestPolicyModulesLoadFromRootDirectory(t *testing.T) {
+	dir := t.TempDir()
+	module := filepath.Join(dir, "auth.star")
+	if err := os.WriteFile(module, []byte("def apply():\n    add_header(\"X-Module\", \"auth\")\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := mustParse(t, wellFormed)
+	opts := DefaultOptions()
+	opts.Filename = filepath.Join(dir, "main.star")
+	err := ExecuteEngineWithOptions("load(\"auth.star\", \"apply\")\ndef evaluate():\n    apply()\n    accept()\n", ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.ModifiedHeaders["X-Module"] != "auth" {
+		t.Fatalf("module did not execute: %v", ctx.ModifiedHeaders)
+	}
+}
 
 // runScript executes a script against a parsed message and returns the context.
 func runScript(t *testing.T, raw, script string) *MessageContext {
@@ -177,6 +197,39 @@ def evaluate():
 
 	if !hasAction(ctx.Actions, "fileinto") {
 		t.Fatalf("expected the bulk message to be filed, got %v", ctx.Actions)
+	}
+}
+
+func TestAIGeneratedMailCanBeFiltered(t *testing.T) {
+	raw := "From: agent@example.com\r\nX-Generated-By: OpenAI agent\r\nSubject: update\r\n\r\nHello\r\n"
+	ctx := runScript(t, raw, `
+def evaluate():
+    if is_ai_generated(threshold=80):
+        fileinto("AI")
+        return
+    accept()
+`)
+	if !hasAction(ctx.Actions, "fileinto") {
+		t.Fatalf("expected AI mail to be filed, got %v", ctx.Actions)
+	}
+}
+
+func TestMetadataProtectionRecordsPolicyRemovals(t *testing.T) {
+	ctx := runScript(t, wellFormed, `
+def evaluate():
+    protect_metadata("standard", extra=["X-Private-Trace"])
+    accept()
+`)
+	for _, name := range []string{"X-Originating-IP", "X-Envelope-To", "X-Private-Trace"} {
+		found := false
+		for _, removed := range ctx.RemovedHeaders {
+			if strings.EqualFold(name, removed) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s was not scheduled for removal: %v", name, ctx.RemovedHeaders)
+		}
 	}
 }
 

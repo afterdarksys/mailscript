@@ -201,6 +201,57 @@ func TestTrainAndClassify(t *testing.T) {
 	}
 }
 
+func TestFisherProducesSeparatedScoresAndUnsureBand(t *testing.T) {
+	opts := DefaultTrainOptions()
+	opts.MinDF = 1
+	opts.HoldoutRatio = 0
+	model, err := Train(spamCorpus(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spam, _ := model.ScoreFor("free viagra discount pills claim prize money now", "spam")
+	ham, _ := model.ScoreFor("meeting notes quarterly report review tuesday", "spam")
+	if spam < 0.9 || ham > 0.1 {
+		t.Fatalf("Fisher scores are not separated: spam=%0.3f ham=%0.3f", spam, ham)
+	}
+	if !model.Unsure("completely unseen vocabulary") {
+		t.Fatal("unseen text should land in the unsure band")
+	}
+}
+
+func TestOSBFeaturesCaptureOrder(t *testing.T) {
+	analyzer := DefaultAnalyzer()
+	analyzer.Stopwords = nil
+	analyzer.NGramMax = 1
+	analyzer.OSBWindow = 3
+	tokens := analyzer.Analyze("wire transfer approval now")
+	if !contains(tokens, "wire~2~approval") {
+		t.Fatalf("expected sparse ordered bigram, got %v", tokens)
+	}
+}
+
+func TestChiSquareFeatureSelectionCapsVocabulary(t *testing.T) {
+	opts := DefaultTrainOptions()
+	opts.MinDF = 1
+	opts.MaxFeatures = 5
+	opts.HoldoutRatio = 0
+	model, err := Train(spamCorpus(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.Vectorizer.NumFeatures() != 5 {
+		t.Fatalf("expected five chi-square-selected features, got %d", model.Vectorizer.NumFeatures())
+	}
+}
+
+func TestFisherRejectsMulticlassCorpus(t *testing.T) {
+	docs := []LabeledDoc{{Label: "a", Text: "alpha"}, {Label: "b", Text: "beta"}, {Label: "c", Text: "gamma"}}
+	_, err := Train(docs, DefaultTrainOptions())
+	if err == nil || !strings.Contains(err.Error(), "binary") {
+		t.Fatalf("expected binary-scorer error, got %v", err)
+	}
+}
+
 func TestProbabilitiesSumToOne(t *testing.T) {
 	opts := DefaultTrainOptions()
 	opts.MinDF = 1

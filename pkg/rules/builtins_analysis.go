@@ -669,6 +669,37 @@ func (e *scriptEnv) humanBuiltins() starlark.StringDict {
 		"has_unsubscribe": nullaryBool("has_unsubscribe", func() bool {
 			return msg.Has("List-Unsubscribe")
 		}),
+
+		"ai_generated_score": nullaryFloat("ai_generated_score", func() float64 {
+			return msg.AssessAI().Score
+		}),
+		"ai_generated_class": nullaryStr("ai_generated_class", func() string {
+			return msg.AssessAI().Class
+		}),
+		"ai_generation_reasons": nullaryList("ai_generation_reasons", func() []string {
+			return msg.AssessAI().Reasons
+		}),
+		"is_ai_generated": starlark.NewBuiltin("is_ai_generated",
+			func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+				var rawThreshold starlark.Value = starlark.Float(70)
+				if err := starlark.UnpackArgs("is_ai_generated", args, kwargs, "threshold?", &rawThreshold); err != nil {
+					return nil, err
+				}
+				threshold := 70.0
+				switch value := rawThreshold.(type) {
+				case starlark.Float:
+					threshold = float64(value)
+				case starlark.Int:
+					integer, ok := value.Int64()
+					if !ok {
+						return nil, fmt.Errorf("is_ai_generated: threshold is out of range")
+					}
+					threshold = float64(integer)
+				default:
+					return nil, fmt.Errorf("is_ai_generated: threshold must be a number")
+				}
+				return starlark.Bool(msg.AssessAI().Score >= threshold), nil
+			}),
 	}
 }
 
@@ -685,6 +716,17 @@ func (e *scriptEnv) networkBuiltins() starlark.StringDict {
 
 	return starlark.StringDict{
 		"dns_available": nullaryBool("dns_available", func() bool { return msg.Resolver.Enabled() }),
+
+		"dnssec_txt": unary("dnssec_txt", "name", func(name string) starlark.Value {
+			answer := msg.Resolver.LookupTXTAuthenticated(name)
+			return dictOf(
+				"name", answer.Name,
+				"records", answer.Records,
+				"found", answer.Found,
+				"dnssec_validated", answer.Secure,
+				"error", answer.Error,
+			)
+		}),
 
 		"dns_check": unaryBool("dns_check", "domain", func(domain string) bool {
 			if !msg.Resolver.Enabled() {

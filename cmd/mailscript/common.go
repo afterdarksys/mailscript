@@ -64,7 +64,7 @@ func addRuntimeFlags(cmd *cobra.Command) {
 	f.StringSliceVar(&trustedAuthServ, "trusted-authserv", nil,
 		"authserv-id values this deployment writes. Authentication-Results from any other authority is never trusted")
 	f.BoolVar(&verifyAuth, "verify", false,
-		"Cryptographically verify SPF, DKIM and DMARC instead of reading Authentication-Results. Implies --dns")
+		"Cryptographically verify SPF, DKIM, DMARC and ARC instead of reading Authentication-Results. Implies --dns")
 	f.BoolVar(&checkDANE, "dane", false, "Also check DANE TLSA records for the sender domain. Implies --verify")
 
 	f.StringVar(&clientIP, "client-ip", "", "Connecting client address, required for SPF evaluation")

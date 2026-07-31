@@ -147,6 +147,14 @@ func printVerifyReport(ctx *rules.MessageContext, result *authverify.Result) {
 	}
 	fmt.Printf("Detail:      %s\n", orNone(result.DMARC.Explanation))
 
+	fmt.Println("\nARC")
+	fmt.Printf("Result: %s\n", result.ARC.Result)
+	fmt.Printf("Detail: %s\n", result.ARC.Explanation)
+	for _, set := range result.ARC.Sets {
+		fmt.Printf("i=%d d=%s s=%s cv=%s ams=%s seal=%s\n",
+			set.Instance, set.Domain, set.Selector, set.ChainValidation, set.MessageSignature, set.Seal)
+	}
+
 	if result.DANE != nil {
 		fmt.Println("\nDANE")
 		fmt.Printf("Result: %s\n", result.DANE.Result)
@@ -219,6 +227,11 @@ func buildVerifyPayload(ctx *rules.MessageContext, result *authverify.Result) ma
 			"spf_aligned":  result.DMARC.SPFAligned,
 			"dkim_aligned": result.DMARC.DKIMAligned,
 			"explanation":  result.DMARC.Explanation,
+		},
+		"arc": map[string]interface{}{
+			"result":      result.ARC.Result,
+			"sets":        result.ARC.Sets,
+			"explanation": result.ARC.Explanation,
 		},
 		"warnings":               result.Warnings(),
 		"authentication_results": result.AuthenticationResults(verifyAuthserv),

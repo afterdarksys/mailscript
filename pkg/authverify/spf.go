@@ -16,6 +16,7 @@
 package authverify
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net"
 	"strings"
@@ -203,6 +204,11 @@ func (e *spfEvaluator) check(domain string) (result, mechanism, record string, e
 	}
 
 	if redirect != "" {
+		expanded, macroErr := e.expandDomainSpec(redirect, domain)
+		if macroErr != nil {
+			return SPFPermError, "redirect", spfRecord, macroErr
+		}
+		redirect = expanded
 		e.redirects++
 		if e.redirects > maxSPFRedirects {
 			return SPFPermError, "redirect", spfRecord, fmt.Errorf("redirect chain exceeded %d hops", maxSPFRedirects)
@@ -291,7 +297,10 @@ func (e *spfEvaluator) evaluateMechanism(name, value, body, domain string) (bool
 		if err := e.spend(); err != nil {
 			return false, err
 		}
-		target, v4Len, v6Len := e.mechanismTarget(value, domain)
+		target, v4Len, v6Len, macroErr := e.mechanismTarget(value, domain)
+		if macroErr != nil {
+			return false, macroErr
+		}
 		addrs := e.resolver.LookupHost(target)
 		if len(addrs) == 0 {
 			if err := e.countVoid(); err != nil {
@@ -304,7 +313,10 @@ func (e *spfEvaluator) evaluateMechanism(name, value, body, domain string) (bool
 		if err := e.spend(); err != nil {
 			return false, err
 		}
-		target, v4Len, v6Len := e.mechanismTarget(value, domain)
+		target, v4Len, v6Len, macroErr := e.mechanismTarget(value, domain)
+		if macroErr != nil {
+			return false, macroErr
+		}
 		hosts := e.resolver.LookupMX(target)
 		if len(hosts) == 0 {
 			if err := e.countVoid(); err != nil {
@@ -326,7 +338,11 @@ func (e *spfEvaluator) evaluateMechanism(name, value, body, domain string) (bool
 		if err := e.spend(); err != nil {
 			return false, err
 		}
-		target := strings.ToLower(strings.TrimSpace(value))
+		target, macroErr := e.expandDomainSpec(value, domain)
+		if macroErr != nil {
+			return false, macroErr
+		}
+		target = strings.ToLower(strings.TrimSpace(target))
 		if target == "" {
 			return false, &spfError{SPFPermError, "include mechanism has no domain"}
 		}
@@ -357,7 +373,11 @@ func (e *spfEvaluator) evaluateMechanism(name, value, body, domain string) (bool
 		if err := e.spend(); err != nil {
 			return false, err
 		}
-		target := strings.ToLower(strings.TrimSpace(value))
+		target, macroErr := e.expandDomainSpec(value, domain)
+		if macroErr != nil {
+			return false, macroErr
+		}
+		target = strings.ToLower(strings.TrimSpace(target))
 		if target == "" {
 			return false, &spfError{SPFPermError, "exists mechanism has no domain"}
 		}
@@ -427,12 +447,12 @@ func (e *spfEvaluator) matchIPMechanism(name, value string) (bool, *spfError) {
 
 // mechanismTarget splits an a/mx mechanism argument into its domain and
 // optional CIDR prefix lengths.
-func (e *spfEvaluator) mechanismTarget(value, domain string) (target string, v4Len, v6Len int) {
+func (e *spfEvaluator) mechanismTarget(value, domain string) (target string, v4Len, v6Len int, macroErr *spfError) {
 	v4Len, v6Len = 32, 128
 	target = domain
 
 	if value == "" {
-		return target, v4Len, v6Len
+		return target, v4Len, v6Len, nil
 	}
 
 	// The form is [domain][/v4len][//v6len].
@@ -446,7 +466,11 @@ func (e *spfEvaluator) mechanismTarget(value, domain string) (target string, v4L
 		rest = rest[:i]
 	}
 	if strings.TrimSpace(rest) != "" {
-		target = strings.ToLower(strings.TrimSpace(rest))
+		target, macroErr = e.expandDomainSpec(strings.TrimSpace(rest), domain)
+		if macroErr != nil {
+			return "", v4Len, v6Len, macroErr
+		}
+		target = strings.ToLower(target)
 	}
 
 	if v4Len < 0 || v4Len > 32 {
@@ -455,7 +479,99 @@ func (e *spfEvaluator) mechanismTarget(value, domain string) (target string, v4L
 	if v6Len < 0 || v6Len > 128 {
 		v6Len = 128
 	}
-	return target, v4Len, v6Len
+	return target, v4Len, v6Len, nil
+}
+
+// expandDomainSpec implements the commonly used SPF macros from RFC 7208
+// section 7, including transformers such as %{d2} and %{ir}. DNS-dependent
+// %{p} is rejected rather than silently evaluated incorrectly.
+func (e *spfEvaluator) expandDomainSpec(spec, currentDomain string) (string, *spfError) {
+	values := map[byte]string{
+		's': e.sender, 'd': currentDomain, 'i': e.ip.String(), 'h': e.helo,
+		'v': map[bool]string{true: "in-addr", false: "ip6"}[e.ipIsV4],
+	}
+	if !e.ipIsV4 {
+		nibbles := hex.EncodeToString(e.ip.To16())
+		parts := make([]string, 0, len(nibbles))
+		for _, nibble := range nibbles {
+			parts = append(parts, string(nibble))
+		}
+		values['i'] = strings.Join(parts, ".")
+	}
+	if at := strings.LastIndex(e.sender, "@"); at >= 0 {
+		values['l'], values['o'] = e.sender[:at], e.sender[at+1:]
+	}
+	var out strings.Builder
+	for i := 0; i < len(spec); {
+		if spec[i] != '%' {
+			out.WriteByte(spec[i])
+			i++
+			continue
+		}
+		if i+1 >= len(spec) {
+			return "", &spfError{SPFPermError, "trailing % in SPF macro string"}
+		}
+		switch spec[i+1] {
+		case '%':
+			out.WriteByte('%')
+			i += 2
+			continue
+		case '_':
+			out.WriteByte(' ')
+			i += 2
+			continue
+		case '-':
+			out.WriteString("%20")
+			i += 2
+			continue
+		case '{':
+		default:
+			return "", &spfError{SPFPermError, fmt.Sprintf("invalid SPF macro escape %%%c", spec[i+1])}
+		}
+		end := strings.IndexByte(spec[i+2:], '}')
+		if end < 0 {
+			return "", &spfError{SPFPermError, "unterminated SPF macro"}
+		}
+		expr := spec[i+2 : i+2+end]
+		if expr == "" {
+			return "", &spfError{SPFPermError, "empty SPF macro"}
+		}
+		letter := expr[0]
+		if letter == 'p' || letter < 'a' || letter > 'z' {
+			return "", &spfError{SPFPermError, fmt.Sprintf("unsupported SPF macro %%{%s}", expr)}
+		}
+		value, ok := values[letter]
+		if !ok {
+			return "", &spfError{SPFPermError, fmt.Sprintf("unsupported SPF macro %%{%s}", expr)}
+		}
+		rest := expr[1:]
+		digits := 0
+		for len(rest) > 0 && rest[0] >= '0' && rest[0] <= '9' {
+			digits = digits*10 + int(rest[0]-'0')
+			rest = rest[1:]
+		}
+		reverse := false
+		if strings.HasPrefix(rest, "r") {
+			reverse = true
+			rest = rest[1:]
+		}
+		delimiters := rest
+		if delimiters == "" {
+			delimiters = "."
+		}
+		parts := strings.FieldsFunc(value, func(r rune) bool { return strings.ContainsRune(delimiters, r) })
+		if digits > 0 && len(parts) > digits {
+			parts = parts[len(parts)-digits:]
+		}
+		if reverse {
+			for left, right := 0, len(parts)-1; left < right; left, right = left+1, right-1 {
+				parts[left], parts[right] = parts[right], parts[left]
+			}
+		}
+		out.WriteString(strings.Join(parts, "."))
+		i += end + 3
+	}
+	return out.String(), nil
 }
 
 // anyAddressMatches reports whether the client address falls inside any of

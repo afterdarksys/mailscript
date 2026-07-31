@@ -122,9 +122,17 @@ func printInspectReport(ctx *rules.MessageContext, findings []rules.Finding, ass
 	section("SENDER CLASSIFICATION")
 	fmt.Printf("Class:       %s\n", assessment.Class)
 	fmt.Printf("Human score: %.0f / 100\n", assessment.Score)
+	ai := ctx.AssessAI()
+	fmt.Printf("AI provenance: %s (%.0f / 100)\n", ai.Class, ai.Score)
 	if verbose && len(assessment.Reasons) > 0 {
 		fmt.Println("Signals:")
 		for _, reason := range assessment.Reasons {
+			fmt.Printf("%s\n", reason)
+		}
+	}
+	if verbose && len(ai.Reasons) > 0 {
+		fmt.Println("AI signals:")
+		for _, reason := range ai.Reasons {
 			fmt.Printf("%s\n", reason)
 		}
 	}
@@ -139,6 +147,7 @@ func printInspectReport(ctx *rules.MessageContext, findings []rules.Finding, ass
 			fmt.Printf("d=%s s=%s %s: %s\n", sig.Domain, sig.Selector, sig.Algorithm, sig.Explanation)
 		}
 		fmt.Printf("DMARC:       %s (%s)\n", result.DMARC.Result, orNone(result.DMARC.Explanation))
+		fmt.Printf("ARC:         %s (%s)\n", result.ARC.Result, orNone(result.ARC.Explanation))
 		fmt.Printf("Disposition: %s\n", result.Disposition())
 		if result.DANE != nil {
 			fmt.Printf("DANE:        %s (%s)\n", result.DANE.Result, result.DANE.Explanation)
@@ -148,7 +157,7 @@ func printInspectReport(ctx *rules.MessageContext, findings []rules.Finding, ass
 		}
 	} else {
 		reported := ctx.AuthResults()
-		fmt.Println("Not verified. Pass --verify to check SPF, DKIM and DMARC cryptographically.")
+		fmt.Println("Not verified. Pass --verify to check SPF, DKIM, DMARC and ARC cryptographically.")
 		if reported.Present {
 			fmt.Printf("Reported by upstream: spf=%s dkim=%s dmarc=%s\n",
 				orNone(reported.SPF), orNone(reported.DKIM), orNone(reported.DMARC))

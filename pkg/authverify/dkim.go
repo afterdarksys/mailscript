@@ -178,14 +178,24 @@ func VerifyDKIM(resolver *dnsx.Resolver, headers [][2]string, body []byte, now t
 
 // verifyOneDKIM verifies the signature at headers[sigIndex].
 func verifyOneDKIM(resolver *dnsx.Resolver, headers [][2]string, sigIndex int, body []byte, now time.Time) DKIMSignatureResult {
+	return verifyOneMessageSignature(resolver, headers, sigIndex, body, now, "DKIM-Signature", true)
+}
+
+// verifyOneMessageSignature implements the common DKIM/ARC-Message-Signature
+// grammar. ARC omits DKIM's v= tag and signs its own field name.
+func verifyOneMessageSignature(resolver *dnsx.Resolver, headers [][2]string, sigIndex int, body []byte, now time.Time, fieldName string, requireVersion bool) DKIMSignatureResult {
 	out := DKIMSignatureResult{Result: DKIMPermError}
 
 	rawSig := headers[sigIndex][1]
-	tags := parseDKIMTags(rawSig)
+	tags, tagErr := parseStrictDKIMTags(rawSig)
+	if tagErr != nil {
+		out.Explanation = tagErr.Error()
+		return out
+	}
 
 	// -- Required tags (RFC 6376 section 3.5) -------------------------------
 
-	if version := tags["v"]; version != "1" {
+	if version := tags["v"]; requireVersion && version != "1" {
 		out.Explanation = fmt.Sprintf("unsupported DKIM version %q", version)
 		return out
 	}
@@ -342,7 +352,7 @@ func verifyOneDKIM(resolver *dnsx.Resolver, headers [][2]string, sigIndex int, b
 
 	// -- Header hash --------------------------------------------------------
 
-	headerInput := buildSignedHeaderInput(headers, sigIndex, signedHeaderNames, rawSig, headerCanon)
+	headerInput := buildSignedHeaderInput(headers, sigIndex, signedHeaderNames, rawSig, headerCanon, fieldName)
 
 	headerHasher := newHash()
 	headerHasher.Write(headerInput)
@@ -434,7 +444,10 @@ func fetchDKIMKey(resolver *dnsx.Resolver, selector, domain string) (*dkimKey, *
 		return nil, &dkimKeyError{DKIMPermError, "DKIM key record exceeds the size limit"}
 	}
 
-	tags := parseDKIMTags(record)
+	tags, tagErr := parseStrictDKIMTags(record)
+	if tagErr != nil {
+		return nil, &dkimKeyError{DKIMPermError, tagErr.Error()}
+	}
 
 	if v := strings.TrimSpace(tags["v"]); v != "" && !strings.EqualFold(v, "DKIM1") {
 		return nil, &dkimKeyError{DKIMPermError, fmt.Sprintf("unsupported key record version %q", v)}
@@ -492,7 +505,7 @@ func fetchDKIMKey(resolver *dnsx.Resolver, selector, domain string) (*dkimKey, *
 // buildSignedHeaderInput assembles the exact byte sequence the signature
 // covers: each named header in h= order, followed by the DKIM-Signature
 // field itself with its b= value emptied.
-func buildSignedHeaderInput(headers [][2]string, sigIndex int, names []string, rawSig, canon string) []byte {
+func buildSignedHeaderInput(headers [][2]string, sigIndex int, names []string, rawSig, canon, signatureField string) []byte {
 	var sb strings.Builder
 
 	// RFC 6376 section 5.4.2: for each name in h=, take the last unused
@@ -532,7 +545,7 @@ func buildSignedHeaderInput(headers [][2]string, sigIndex int, names []string, r
 	// The DKIM-Signature field is appended with an empty b= value and, in
 	// simple canonicalisation, without a trailing CRLF.
 	stripped := stripSignatureValue(rawSig)
-	line := canonicalizeHeader("DKIM-Signature", stripped, canon)
+	line := canonicalizeHeader(signatureField, stripped, canon)
 	sb.WriteString(strings.TrimSuffix(line, "\r\n"))
 
 	return []byte(sb.String())
@@ -618,6 +631,31 @@ func parseDKIMTags(s string) map[string]string {
 		tags[key] = strings.TrimSpace(part[eq+1:])
 	}
 	return tags
+}
+
+// parseStrictDKIMTags enforces RFC 6376's lowercase, unique tag names for
+// cryptographic material. The lenient parser remains for non-DKIM tag-list
+// formats such as ARC-Authentication-Results instance discovery.
+func parseStrictDKIMTags(s string) (map[string]string, error) {
+	tags := make(map[string]string)
+	for _, part := range strings.Split(s, ";") {
+		eq := strings.Index(part, "=")
+		if eq < 0 {
+			continue
+		}
+		key := strings.TrimSpace(part[:eq])
+		if key == "" {
+			continue
+		}
+		if key != strings.ToLower(key) {
+			return nil, fmt.Errorf("DKIM tag name %q must be lowercase", key)
+		}
+		if _, exists := tags[key]; exists {
+			return nil, fmt.Errorf("duplicate DKIM tag %q", key)
+		}
+		tags[key] = strings.TrimSpace(part[eq+1:])
+	}
+	return tags, nil
 }
 
 // countHeader counts how many times a field name appears.

@@ -13,14 +13,19 @@ cd mailscript
 
 ## What it does
 
-- **Rules in Starlark**, a Python-like language, with 234 mail-aware builtins.
+- **Rules in Starlark**, a Python-like language, with 253 mail-aware builtins.
 - **Header validation** covering RFC 5322 conformance, spoofing, and header
   injection.
-- **Real cryptographic verification** of SPF, DKIM, DMARC and DANE, computed
+- **Real cryptographic verification** of SPF, DKIM, DMARC, ARC and DANE, computed
   from the message bytes rather than read from a header a sender can forge.
+- **Transport policy discovery** for DNSSEC, DANE, MTA-STS and TLS-RPT.
+- **Policy-driven metadata protection** and explicit AI-agent provenance
+  filtering at delivery time.
 - **Human versus machine classification**, separating correspondence from
   bulk, transactional, list and automated mail.
-- **TF-IDF classification** with optional BERT tokenization and GoLearn.
+- **Fisher/Robinson and TF-IDF classification** with an unsure band,
+  chi-square feature selection, optional OSB order features, BERT tokenization
+  and GoLearn.
 - **mbox and Maildir processing**, JSON output, an SMTP proxy, and a gRPC
   interface.
 
@@ -188,6 +193,31 @@ Complete examples in [`examples/`](examples/):
 | `human-mail.star` | route by sender class |
 | `spam-filter.star` | keyword and score filtering |
 | `corporate-policy.star` | DLP and content policy |
+| `policy-bundle.star` | compose authentication, content, AI, and privacy modules |
+| `transport-security.star` | DNSSEC/DANE/MTA-STS/TLS-RPT audit policy |
+| `metadata-protection.star` | on-demand metadata minimization |
+
+### Splitting policy across files
+
+A root policy can load functions from any `.star` file beneath its own
+directory. Paths cannot be absolute or escape that directory.
+
+```python
+load("policies/authentication.star", "apply_authentication")
+load("policies/content.star", "apply_content_safety")
+
+def evaluate():
+    apply_authentication()
+    if apply_content_safety():
+        return
+    accept()
+```
+
+Run the root normally; its modules are loaded together:
+
+```bash
+mailscript proxy --script=examples/policy-bundle.star --dns --upstream=mail.internal:25
+```
 
 ## DNS
 
@@ -196,8 +226,24 @@ enable it, or `--verify`, which implies it. Answers are cached for five
 minutes with a three-second per-query timeout.
 
 DANE additionally needs a DNSSEC-validating resolver: TLSA records that arrive
-without the Authenticated Data bit are reported as `insecure`, never `pass`,
+without the Authenticated Data bit are reported as `insecure`, never usable,
 because an attacker who can forge the answer can also strip it.
+
+MTA-STS and TLS-RPT are available to rules through `check_mta_sts()` and
+`check_tlsrpt()`. MTA-STS policy files are fetched over authenticated HTTPS;
+redirects, oversized responses, and private-address fetches are rejected.
+
+```python
+def evaluate():
+    if verify_arc() == "fail":
+        quarantine()
+        return
+    if is_ai_generated(threshold=80):
+        fileinto("AI")
+        return
+    protect_metadata("standard", extra=["X-Internal-Trace"])
+    accept()
+```
 
 ## Building
 
@@ -212,8 +258,9 @@ Requires Go 1.21 or later.
 
 ## Security notes
 
-- Rules are sandboxed: no filesystem, no imports, no network beyond the DNS
-  builtins.
+- Rules are sandboxed. They can load only `.star` modules beneath the root
+  policy directory; network access is limited to DNS builtins and the bounded,
+  HTTPS-only MTA-STS policy fetcher.
 - Execution is bounded by a step limit and a wall-clock timeout, so a runaway
   rule fails one message rather than wedging a worker.
 - Patterns use RE2, which has no backtracking and therefore no catastrophic
@@ -254,18 +301,22 @@ Packages:
 | Package | Contents |
 |---|---|
 | `pkg/rules` | message model, validation, classification, Starlark engine |
-| `pkg/authverify` | SPF, DKIM, DMARC and DANE verification |
-| `pkg/dnsx` | caching DNS client with DNSBL and TLSA support |
-| `pkg/ml` | analyzer, TF-IDF, Naive Bayes, WordPiece tokenizer |
+| `pkg/authverify` | SPF, DKIM, DMARC, ARC, DANE, MTA-STS and TLS-RPT |
+| `pkg/dnsx` | caching DNS client with DNSSEC-aware TXT and TLSA support |
+| `pkg/ml` | Fisher/Robinson, TF-IDF/Bayes, OSB and WordPiece tooling |
 
 ## gRPC
 
-The proxy exposes a gRPC service on port 50051 so any application can submit
-messages for filtering. See `pkg/proto/mailscript.proto`. Generate bindings
-with:
+The proxy exposes a registered gRPC service on port 50051 so applications can
+submit messages for filtering, stream requests, inspect statistics, and check
+health. The generated Go bindings are checked in. After editing
+`pkg/proto/mailscript.proto`, regenerate them with:
 
 ```bash
-protoc --go_out=. --go-grpc_out=. pkg/proto/mailscript.proto
+protoc \
+  --go_out=. --go_opt=module=github.com/afterdarksys/mailscript \
+  --go-grpc_out=. --go-grpc_opt=module=github.com/afterdarksys/mailscript \
+  pkg/proto/mailscript.proto
 ```
 
 ## Related projects

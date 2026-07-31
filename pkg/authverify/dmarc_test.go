@@ -1,10 +1,47 @@
 package authverify
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
+	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/afterdarksys/mailscript/pkg/dnsx"
 )
+
+func TestVerifyDANECertificateMatchAndMismatch(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "mx.example.com"}}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	backend := dnsx.NewStaticBackend().AddTLSA("_25._tcp.mx.example.com", dnsx.TLSAResult{
+		Found: true, Secure: true, Records: []dnsx.TLSARecord{{Usage: UsageDANEEE, Selector: 1, MatchingType: 1, Certificate: hex.EncodeToString(digest[:])}},
+	})
+	matched := VerifyDANECertificate(dnsx.NewTestResolver(backend), "mx.example.com", 25, []*x509.Certificate{cert})
+	if matched.Result != DANEPass || matched.MatchedRecord != 0 {
+		t.Fatalf("expected DANE pass, got %+v", matched)
+	}
+	backend.TLSA["_25._tcp.mx.example.com"] = dnsx.TLSAResult{Found: true, Secure: true, Records: []dnsx.TLSARecord{{Usage: UsageDANEEE, Selector: 1, MatchingType: 1, Certificate: strings.Repeat("00", 32)}}}
+	failed := VerifyDANECertificate(dnsx.NewTestResolver(backend), "mx.example.com", 25, []*x509.Certificate{cert})
+	if failed.Result != DANEFail {
+		t.Fatalf("expected DANE fail, got %+v", failed)
+	}
+}
 
 func TestDMARCPassRequiresAlignment(t *testing.T) {
 	backend := dnsx.NewStaticBackend()
@@ -186,8 +223,8 @@ func TestDANEValidatedPasses(t *testing.T) {
 	resolver := dnsx.NewTestResolver(backend)
 
 	got := CheckDANE(resolver, "mx.example.com", 25)
-	if got.Result != DANEPass {
-		t.Fatalf("expected pass, got %s (%s)", got.Result, got.Explanation)
+	if got.Result != DANEAvailable {
+		t.Fatalf("expected available, got %s (%s)", got.Result, got.Explanation)
 	}
 	if got.UsableRecords != 1 {
 		t.Errorf("expected one usable record, got %d", got.UsableRecords)

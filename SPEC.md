@@ -230,7 +230,7 @@ Implements TLSA discovery per RFC 6698 and RFC 7672.
 
 **DANE without DNSSEC is meaningless.** An attacker who can forge a TLSA
 answer can equally strip it. TLSA records that did not arrive with the DNSSEC
-Authenticated Data bit are reported as `insecure`, never `pass`. Point
+Authenticated Data bit are reported as `insecure`, never usable. Point
 `--dns-server` at a validating resolver to obtain a usable result.
 
 Only `DANE-TA` (2) and `DANE-EE` (3) usages are accepted; RFC 7672 requires
@@ -238,9 +238,28 @@ receivers to ignore the PKIX usages for SMTP. Partial deployment across a
 domain's MX hosts reports `insecure`, because an attacker can steer delivery
 to the host without TLSA.
 
-`verify_dane()` performs discovery. Matching a presented certificate against
-the records additionally requires the TLS handshake, which the proxy performs
-when relaying.
+`verify_dane()` performs discovery and returns `available` when every MX has
+usable, DNSSEC-validated TLSA records. `pass` is reserved for
+`VerifyDANECertificate`, after a presented certificate actually matches.
+DANE on a sender domain is transport-hygiene information, not authentication
+of an inbound message.
+
+### 3.6 ARC
+
+ARC verification follows RFC 8617. `verify_arc()` locally verifies set
+continuity, `cv`, the newest ARC-Message-Signature, and every ARC-Seal using
+DNS-published keys. Earlier message signatures are reported for diagnostics;
+they may legitimately fail after an intermediary modifies the message while
+their sealed historical values remain intact. Upstream `arc=pass` claims are
+never substituted for cryptographic verification.
+
+### 3.7 MTA-STS and TLS-RPT
+
+`check_mta_sts(domain="")` discovers `_mta-sts`, retains the DNSSEC AD state,
+and validates the authenticated HTTPS policy (`version`, `mode`, `mx`, and
+`max_age`). Fetches are bounded and reject redirects and private destinations.
+`check_tlsrpt(domain="")` parses `_smtp._tls` report URIs and exposes whether
+the DNS answer was DNSSEC-validated.
 
 ---
 
@@ -381,16 +400,21 @@ Two distinctions the classifier is careful about:
 
 ## 6. Machine learning
 
-Classification uses TF-IDF features and multinomial Naive Bayes, implemented
-natively with no external dependencies. Scoring a message costs well under a
-millisecond, so it is safe in the SMTP path.
+Binary classification defaults to Robinson-Fisher chi-square combining over
+raw token counts, producing useful scores near 0 and 1 plus an explicit
+unsure band. Robinson geometric mean and legacy multinomial Naive Bayes are
+selectable. TF-IDF remains available for similarity, explanation, and
+multi-class Bayes. Everything is implemented natively with no external
+runtime dependencies.
 
 ### 6.1 Training
 
 ```bash
 mailscript train --spam=spam.mbox --ham=ham.mbox --out=spam.json.gz
 mailscript train --label=phish:phish.mbox --label=bulk:bulk.mbox \
-  --label=legit:inbox.mbox --out=triage.json.gz
+  --label=legit:inbox.mbox --scorer=bayes --out=triage.json.gz
+mailscript train --spam=spam.mbox --ham=ham.mbox --scorer=robinson \
+  --feature-selection=chi2 --osb-window=5 --out=ordered.json.gz
 ```
 
 A held-out split (20% by default) is scored automatically, so the reported
@@ -401,6 +425,8 @@ misclassifies legitimate mail is worse than no model.
 The analyzer is mail-aware. URLs collapse to `url:<host>` so randomised paths
 do not fragment the feature space; addresses collapse to `emaildom:<domain>`;
 shouting and repeated punctuation become their own features.
+Chi-square feature selection ranks terms by dependence on class. Optional OSB
+features preserve token order through bounded sparse bigrams.
 
 ### 6.2 Use
 
@@ -410,7 +436,9 @@ mailscript test --script=filter.star --model=spam.json.gz --eml=message.eml
 
 ```python
 def evaluate():
-    if ml_score("spam") > 0.95:
+    if ml_unsure():
+        fileinto("Review")
+    elif ml_score("spam") > 0.95:
         quarantine()
         return
     accept()
@@ -463,7 +491,7 @@ DNSSEC-validating one.
 
 ## 8. Builtin reference
 
-234 builtins in the current release. `mailscript builtins` prints the exact
+253 builtins in the current release. `mailscript builtins` prints the exact
 set for your binary.
 
 ### 8.1 Actions
@@ -517,9 +545,11 @@ construct the injection its own validator flags.
 ### 8.6 Authentication, verified
 
 `verify_auth(dane=False)` `verify_spf()` `verify_dkim()` `verify_dmarc()`
+`verify_arc()` `verify_arc_details()`
 `verify_dane(domain="")` `is_verified()` `auth_disposition()`
 `auth_warnings()` `auth_summary()` `authentication_results(authserv_id="")`
 `verify_spf_details()` `verify_dkim_details()` `verify_dmarc_details()`
+`check_mta_sts(domain="")` `check_tlsrpt(domain="")`
 
 ### 8.7 Authentication, as reported
 
@@ -560,10 +590,16 @@ construct the injection its own validator flags.
 `is_transactional()` `is_list_mail()` `human_reasons()` `human_signals()`
 `has_human_signal(name)` `is_threaded()` `is_auto_submitted()`
 `is_noreply_sender()` `has_unsubscribe()`
+`ai_generated_score()` `ai_generated_class()` `is_ai_generated(threshold=70)`
+`ai_generation_reasons()`
+
+AI identification uses declared provenance and sending-system markers. It
+does not label mail from prose style alone, which is not a dependable signal.
 
 ### 8.12 Machine learning
 
-`ml_available()` `ml_models()` `classify(model="", text="")`
+`ml_available()` `ml_models()` `ml_scorer(model="")`
+`ml_unsure(model="", text="")` `classify(model="", text="")`
 `classify_label(model="")` `ml_score(class, model="", text="")`
 `ml_explain(model="", limit=10)` `tfidf_score(class, model="")`
 `tokenize(text="", ngram_max=1)` `token_vector(model="", text="", limit=50)`
@@ -577,7 +613,7 @@ construct the injection its own validator flags.
 ### 8.13 DNS
 
 `dns_available()` `dns_check(domain)` `dns_resolution(domain)` `dns_a(domain)`
-`dns_txt(domain)` `dns_ptr(ip)` `get_mx_records(domain)` `valid_mx(domain)`
+`dns_txt(domain)` `dnssec_txt(name)` `dns_ptr(ip)` `get_mx_records(domain)` `valid_mx(domain)`
 `is_mx_ipv4(domain)` `is_mx_ipv6(domain)` `domain_resolution(sender, verify=False)`
 `rbl_check(ip, rbl_server="")` `rbl_lookup(ip, rbl_server="")`
 `get_rbl_status()` `mx_in_rbl(domain, rbl_server="")` `fcrdns_valid(ip)`
@@ -596,6 +632,10 @@ comments. `domain_in_list` honours subdomains, so one entry covers a zone.
 `getmimetype()` `getspamscore()` `getvirusstatus()` `body_size()`
 `message_size()` `get_instance()` `get_instance_name()` `now()`
 `date_skew_seconds()` `message_age_seconds()` `parse_date(value)`
+`protect_metadata(policy="standard", extra=[])`
+
+Metadata policies are `minimal`, `standard`, and `strict`. Removals happen
+after rule evaluation so authentication always sees the original wire bytes.
 
 ### 8.16 Legacy
 
