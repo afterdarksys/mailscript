@@ -799,6 +799,76 @@ func (e *scriptEnv) metadataBuiltins() starlark.StringDict {
 			}
 			return false
 		}),
+		"analyzers_available": nullaryList("analyzers_available", func() []string {
+			out := make([]string, 0, len(msg.AnalyzerResults))
+			for _, result := range msg.AnalyzerResults {
+				out = append(out, result.Analyzer)
+			}
+			return out
+		}),
+		"threat_verdict":   nullaryStr("threat_verdict", msg.ThreatVerdict),
+		"threat_score":     nullaryFloat("threat_score", msg.ThreatScore),
+		"analysis_pending": nullaryBool("analysis_pending", msg.AnalysisPending),
+		"threat_categories": nullaryList("threat_categories", func() []string {
+			var out []string
+			seen := map[string]struct{}{}
+			for _, result := range msg.AnalyzerResults {
+				for _, category := range result.Categories {
+					if _, exists := seen[category]; !exists {
+						seen[category] = struct{}{}
+						out = append(out, category)
+					}
+				}
+			}
+			return out
+		}),
+		"threat_reasons": nullaryList("threat_reasons", func() []string {
+			var out []string
+			for _, result := range msg.AnalyzerResults {
+				for _, finding := range result.Findings {
+					if finding.Summary != "" {
+						out = append(out, finding.Summary)
+					}
+				}
+			}
+			return out
+		}),
+		"analysis_findings": nullary("analysis_findings", func() starlark.Value {
+			var out []starlark.Value
+			for _, result := range msg.AnalyzerResults {
+				for _, finding := range result.Findings {
+					out = append(out, dictOf(
+						"source", finding.Source,
+						"code", finding.Code,
+						"summary", finding.Summary,
+						"severity", finding.Severity,
+						"confidence", finding.Confidence,
+						"attachment", finding.Attachment,
+					))
+				}
+			}
+			return starlark.NewList(out)
+		}),
+		"has_analysis_finding": unaryBool("has_analysis_finding", "code", func(code string) bool {
+			for _, result := range msg.AnalyzerResults {
+				for _, finding := range result.Findings {
+					if finding.Code == code {
+						return true
+					}
+				}
+			}
+			return false
+		}),
+		"has_capability": unaryBool("has_capability", "code", func(code string) bool {
+			for _, result := range msg.AnalyzerResults {
+				for _, finding := range result.Findings {
+					if finding.Code == code {
+						return true
+					}
+				}
+			}
+			return false
+		}),
 		"body_size": nullary("body_size", func() starlark.Value { return starlark.MakeInt64(msg.BodySize) }),
 		"message_size": nullary("message_size", func() starlark.Value {
 			return starlark.MakeInt64(msg.BodySize + msg.HeaderSize)

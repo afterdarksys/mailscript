@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/afterdarksys/mailscript/pkg/dnsx"
@@ -23,25 +25,28 @@ var (
 
 // Shared runtime options, registered on commands that execute rules.
 var (
-	enableDNS       bool
-	dnsServer       string
-	dnsTimeout      time.Duration
-	rblZones        []string
-	modelPaths      []string
-	bertVocabPath   string
-	listPaths       []string
-	trustedAuthServ []string
-	verifyAuth      bool
-	checkDANE       bool
-	clientIP        string
-	heloName        string
-	maxSteps        uint64
-	scriptTimeout   time.Duration
-	clamAVURL       string
-	clamAVTimeout   time.Duration
-	yaraURL         string
-	yaraTimeout     time.Duration
-	yaraMaxBytes    int64
+	enableDNS        bool
+	dnsServer        string
+	dnsTimeout       time.Duration
+	rblZones         []string
+	modelPaths       []string
+	bertVocabPath    string
+	listPaths        []string
+	trustedAuthServ  []string
+	verifyAuth       bool
+	checkDANE        bool
+	clientIP         string
+	heloName         string
+	maxSteps         uint64
+	scriptTimeout    time.Duration
+	clamAVURL        string
+	clamAVTimeout    time.Duration
+	yaraURL          string
+	yaraTimeout      time.Duration
+	yaraMaxBytes     int64
+	analyzerSpecs    []string
+	analyzerTimeout  time.Duration
+	analyzerMaxBytes int64
 )
 
 // addRuntimeFlags registers the flags shared by every rule-executing command.
@@ -77,16 +82,20 @@ func addRuntimeFlags(cmd *cobra.Command) {
 	f.StringVar(&yaraURL, "yara-url", "", "Private YARA scanner sidecar base URL (POST /v1/scan)")
 	f.DurationVar(&yaraTimeout, "yara-timeout", 30*time.Second, "Maximum YARA scan duration")
 	f.Int64Var(&yaraMaxBytes, "yara-max-bytes", 26214400, "Maximum RFC 822 message size sent to the YARA scanner (0 disables limit)")
+	f.StringSliceVar(&analyzerSpecs, "analyzer", nil, "Analysis sidecar as name=URL; repeatable (POST /v1/analyze)")
+	f.DurationVar(&analyzerTimeout, "analyzer-timeout", 30*time.Second, "Maximum duration for each analysis sidecar")
+	f.Int64Var(&analyzerMaxBytes, "analyzer-max-bytes", 26214400, "Maximum RFC 822 message size sent to an analyzer (0 disables limit)")
 }
 
 // runtime holds the resources built from the shared flags.
 type runtime struct {
-	resolver *dnsx.Resolver
-	models   *ml.Registry
-	bert     *ml.BertTokenizer
-	lists    map[string]map[string]bool
-	clamav   *clamAVScanner
-	yara     *yaraScanner
+	resolver  *dnsx.Resolver
+	models    *ml.Registry
+	bert      *ml.BertTokenizer
+	lists     map[string]map[string]bool
+	clamav    *clamAVScanner
+	yara      *yaraScanner
+	analyzers []*analyzerClient
 }
 
 // buildRuntime constructs the shared resources, failing closed on any
@@ -127,6 +136,18 @@ func buildRuntime() (*runtime, error) {
 	}
 	if yaraURL != "" {
 		rt.yara = newYARAScanner(yaraURL, yaraTimeout, yaraMaxBytes)
+	}
+	seenAnalyzers := make(map[string]struct{}, len(analyzerSpecs))
+	for _, spec := range analyzerSpecs {
+		name, endpoint := splitNameSpec(spec)
+		if !validAnalyzerName(name) || !validAnalyzerEndpoint(endpoint) {
+			return nil, fmt.Errorf("analyzer %q must be name=URL using letters, digits, '.', '_' or '-'", spec)
+		}
+		if _, exists := seenAnalyzers[name]; exists {
+			return nil, fmt.Errorf("duplicate analyzer name %q", name)
+		}
+		seenAnalyzers[name] = struct{}{}
+		rt.analyzers = append(rt.analyzers, newAnalyzerClient(name, endpoint, analyzerTimeout, analyzerMaxBytes))
 	}
 
 	if bertVocabPath != "" {
@@ -222,6 +243,7 @@ func (rt *runtime) apply(ctx *rules.MessageContext) {
 			ctx.YARAMatches = matches
 		}
 	}
+	rt.applyAnalyzers(ctx, rawMessage(ctx))
 
 	if clientIP != "" {
 		ctx.SenderIP = clientIP
@@ -235,6 +257,52 @@ func (rt *runtime) apply(ctx *rules.MessageContext) {
 	if verifyAuth && rt.resolver != nil {
 		ctx.VerifyAuth(checkDANE)
 	}
+}
+
+// applyAnalyzers runs independent sidecars concurrently but appends their
+// results and errors in configuration order for deterministic policy output.
+func (rt *runtime) applyAnalyzers(ctx *rules.MessageContext, raw []byte) {
+	type outcome struct {
+		result rules.AnalyzerResult
+		err    error
+	}
+	outcomes := make([]outcome, len(rt.analyzers))
+	var wg sync.WaitGroup
+	for i, analyzer := range rt.analyzers {
+		i, analyzer := i, analyzer
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			outcomes[i].result, outcomes[i].err = analyzer.analyze(context.Background(), raw)
+		}()
+	}
+	wg.Wait()
+	for i, outcome := range outcomes {
+		if outcome.err != nil {
+			ctx.LogEntries = append(ctx.LogEntries, "analyzer "+rt.analyzers[i].name+" unavailable: "+outcome.err.Error())
+			continue
+		}
+		ctx.AnalyzerResults = append(ctx.AnalyzerResults, outcome.result)
+	}
+}
+
+func validAnalyzerName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validAnalyzerEndpoint(endpoint string) bool {
+	parsed, err := url.ParseRequestURI(endpoint)
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
 func rawMessage(ctx *rules.MessageContext) []byte {

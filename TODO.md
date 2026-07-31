@@ -19,6 +19,9 @@ There are no known outstanding repository items as of 2026-07-31.
 - Documented that inbound DANE is transport hygiene, not authentication.
 - Added composable policy modules, transport policy checks, metadata
   minimization, and explicit AI provenance filtering.
+- Added a bounded, concurrent external-analyzer contract with normalized
+  verdicts and explainable findings for open-source capa, oletools, OCR/QR,
+  and sandbox sidecars.
 
 The former `code-review-graph` server `torch` note was an external MCP server
 environment issue, not part of this repository. It has been removed from the

@@ -13,7 +13,7 @@ cd mailscript
 
 ## What it does
 
-- **Rules in Starlark**, a Python-like language, with 253 mail-aware builtins.
+- **Rules in Starlark**, a Python-like language, with 262 mail-aware builtins.
 - **Header validation** covering RFC 5322 conformance, spoofing, and header
   injection.
 - **Real cryptographic verification** of SPF, DKIM, DMARC, ARC and DANE, computed
@@ -26,6 +26,9 @@ cd mailscript
 - **Fisher/Robinson and TF-IDF classification** with an unsure band,
   chi-square feature selection, optional OSB order features, BERT tokenization
   and GoLearn.
+- **Open-source analysis sidecars** for explainable executable, document,
+  OCR/QR, and sandbox findings without loading native parsers into the mail
+  process.
 - **mbox and Maildir processing**, JSON output, an SMTP proxy, and a gRPC
   interface.
 
@@ -97,6 +100,22 @@ pipeline.
 mailscript test --script=filter.star --from=spam@evil.example --subject="Buy now" -v
 mailscript test --script=filter.star --eml=message.eml --verify --json
 ```
+
+External open-source analyzers can be attached as isolated HTTP sidecars:
+
+```bash
+mailscript test --script=filter.star --eml=message.eml \
+  --analyzer=capa=http://127.0.0.1:4471 \
+  --analyzer=oletools=http://127.0.0.1:4472 \
+  --analyzer=ocr=http://127.0.0.1:4473
+```
+
+Each sidecar receives the original message as `message/rfc822` at
+`POST /v1/analyze`. Policies consume stable finding codes with
+`has_finding()`, `has_capability()`, `threat_verdict()`, and
+`analysis_findings()`. Analyzers run concurrently; unavailable or malformed
+sidecars are logged and never treated as clean. See the sidecar contract in
+`SPEC.md`.
 
 ### `process` — mailboxes
 
@@ -196,6 +215,7 @@ Complete examples in [`examples/`](examples/):
 | `policy-bundle.star` | compose authentication, content, AI, and privacy modules |
 | `transport-security.star` | DNSSEC/DANE/MTA-STS/TLS-RPT audit policy |
 | `metadata-protection.star` | on-demand metadata minimization |
+| `open-source-analysis.star` | gates for capa, oletools, OCR/QR, and sandbox findings |
 
 ### Splitting policy across files
 

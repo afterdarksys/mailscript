@@ -491,7 +491,7 @@ DNSSEC-validating one.
 
 ## 8. Builtin reference
 
-253 builtins in the current release. `mailscript builtins` prints the exact
+262 builtins in the current release. `mailscript builtins` prints the exact
 set for your binary.
 
 ### 8.1 Actions
@@ -634,10 +634,63 @@ comments. `domain_in_list` honours subdomains, so one entry covers a zone.
 `date_skew_seconds()` `message_age_seconds()` `parse_date(value)`
 `protect_metadata(policy="standard", extra=[])`
 
+External analysis sidecars add:
+
+`analyzers_available()` `threat_verdict()` `threat_score()`
+`analysis_pending()` `threat_categories()` `threat_reasons()`
+`analysis_findings()` `has_analysis_finding(code)` `has_capability(code)`
+
+`has_finding(code)` checks both header-validation and external-analysis
+findings, preserving its original validation behavior while allowing one
+policy gate for stable finding codes.
+
 Metadata policies are `minimal`, `standard`, and `strict`. Removals happen
 after rule evaluation so authentication always sees the original wire bytes.
 
-### 8.16 Legacy
+### 8.16 External analyzer sidecars
+
+`--analyzer name=URL` is repeatable. MailScript sends the original RFC 822
+message to `POST URL/v1/analyze` with `Content-Type: message/rfc822`. The
+default timeout is 30 seconds and the default input limit is 25 MiB; configure
+them with `--analyzer-timeout` and `--analyzer-max-bytes`.
+
+The response is JSON:
+
+```json
+{
+  "verdict": "suspicious",
+  "score": 0.87,
+  "categories": ["execution"],
+  "findings": [
+    {
+      "code": "process/create-powershell",
+      "summary": "Executable can launch PowerShell",
+      "severity": "high",
+      "confidence": 0.91,
+      "attachment": "invoice.exe"
+    }
+  ],
+  "iocs": [],
+  "model_version": "capa-rules-2026-07",
+  "deferred": false
+}
+```
+
+Verdict must be `clean`, `unknown`, `suspicious`, or `malicious`; score and
+finding confidence must be between 0 and 1. MailScript supplies the configured
+analyzer name as each finding's source, validates the response, and treats an
+unavailable or malformed analyzer as unavailable rather than clean. Sidecars
+should run on a private interface under their own CPU, memory, recursion, and
+execution limits. Configured analyzers run concurrently, while their results
+remain in configuration order so logs and policy output are deterministic.
+
+The generic contract does not bundle capa, oletools, an OCR engine, or a
+sandbox into the MailScript binary. Deploy those tools as separately confined
+services and translate their native output into this response. This separation
+keeps optional native dependencies and untrusted document parsers outside the
+SMTP process.
+
+### 8.17 Legacy
 
 Retained for compatibility with MailScript 1.x scripts:
 `get_recipient_did()` `get_content_filter()` `get_content_filter_name()`

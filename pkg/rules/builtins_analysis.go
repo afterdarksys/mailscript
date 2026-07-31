@@ -66,6 +66,13 @@ func (e *scriptEnv) validationBuiltins() starlark.StringDict {
 					return true
 				}
 			}
+			for _, result := range msg.AnalyzerResults {
+				for _, finding := range result.Findings {
+					if finding.Code == code {
+						return true
+					}
+				}
+			}
 			return false
 		}),
 

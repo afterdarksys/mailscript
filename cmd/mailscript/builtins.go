@@ -47,7 +47,7 @@ func runBuiltins(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	// Three columns keeps a 234-entry list readable in a terminal.
+	// Three columns keeps the full builtin list readable in a terminal.
 	const columns = 3
 	width := 0
 	for _, name := range names {

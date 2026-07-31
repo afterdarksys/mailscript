@@ -206,6 +206,16 @@ func printInspectReport(ctx *rules.MessageContext, findings []rules.Finding, ass
 		fmt.Printf("BIDI OVERRIDE IN FILENAME: %s\n", name)
 	}
 
+	if len(ctx.AnalyzerResults) > 0 {
+		section(fmt.Sprintf("THREAT ANALYSIS (%s, score %.2f)", strings.ToUpper(ctx.ThreatVerdict()), ctx.ThreatScore()))
+		for _, result := range ctx.AnalyzerResults {
+			fmt.Printf("%s: %s (score %.2f)\n", result.Analyzer, result.Verdict, result.Score)
+			for _, finding := range result.Findings {
+				fmt.Printf("%s: %s\n", finding.Code, finding.Summary)
+			}
+		}
+	}
+
 	fmt.Println()
 }
 
@@ -252,6 +262,14 @@ func buildInspectPayload(ctx *rules.MessageContext, findings []rules.Finding, as
 			"double_extensions":      ctx.DoubleExtensionAttachments(),
 			"url_display_mismatches": len(ctx.URLDisplayMismatches()),
 		},
+	}
+	if len(ctx.AnalyzerResults) > 0 {
+		payload["threat_analysis"] = map[string]interface{}{
+			"verdict":   ctx.ThreatVerdict(),
+			"score":     ctx.ThreatScore(),
+			"pending":   ctx.AnalysisPending(),
+			"analyzers": ctx.AnalyzerResults,
+		}
 	}
 
 	if ctx.Verified != nil {

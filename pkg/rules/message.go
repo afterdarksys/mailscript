@@ -63,14 +63,15 @@ type MessageContext struct {
 	// case-insensitive and duplicate-aware.
 	Headers         map[string]string
 	HeaderList      []Header
-	Body            string   // raw body as received (undecoded)
-	MimeType        string   // top-level Content-Type value
-	SpamScore       float64  // externally supplied spam score (0.0 to 10.0)
-	VirusStatus     string   // virus scan status: "clean", "infected", "unknown"
-	AVSignature     string   // scanner signature when VirusStatus is infected
-	AVAvailable     bool     // whether an AV scanner was configured and responded
-	YARAAvailable   bool     // whether a YARA scanner was configured and responded
-	YARAMatches     []string // rule names matched by the configured rule pack
+	Body            string           // raw body as received (undecoded)
+	MimeType        string           // top-level Content-Type value
+	SpamScore       float64          // externally supplied spam score (0.0 to 10.0)
+	VirusStatus     string           // virus scan status: "clean", "infected", "unknown"
+	AVSignature     string           // scanner signature when VirusStatus is infected
+	AVAvailable     bool             // whether an AV scanner was configured and responded
+	YARAAvailable   bool             // whether a YARA scanner was configured and responded
+	YARAMatches     []string         // rule names matched by the configured rule pack
+	AnalyzerResults []AnalyzerResult // normalized results from external analysis sidecars
 	SenderDID       string
 	Actions         []string          // actions taken by the script, in order
 	ModifiedHeaders map[string]string // headers added or modified by the script

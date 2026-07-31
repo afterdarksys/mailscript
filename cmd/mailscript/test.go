@@ -96,6 +96,12 @@ func runTest(cmd *cobra.Command, args []string) error {
 		if ctx.Verified != nil {
 			payload["authentication"] = authPayload(ctx)
 		}
+		if len(ctx.AnalyzerResults) > 0 {
+			payload["threat_analysis"] = map[string]interface{}{
+				"verdict": ctx.ThreatVerdict(), "score": ctx.ThreatScore(),
+				"pending": ctx.AnalysisPending(), "analyzers": ctx.AnalyzerResults,
+			}
+		}
 		if err := printJSON(payload); err != nil {
 			return err
 		}

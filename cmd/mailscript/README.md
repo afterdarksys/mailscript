@@ -4,8 +4,9 @@ Powerful Starlark-based email filtering that runs anywhere. Test offline, proces
 
 MailScript can locally verify SPF, DKIM, DMARC, ARC, and DANE; inspect
 DNSSEC-aware transport policy; minimize metadata at a trust boundary; and
-route explicitly AI-generated mail. See the repository `README.md` and
-`SPEC.md` for the security model and complete 253-builtin reference.
+route explicitly AI-generated mail. It can also consume normalized findings
+from isolated open-source analysis sidecars. See the repository `README.md`
+and `SPEC.md` for the security model and complete 262-builtin reference.
 
 ## Commands
 
@@ -17,7 +18,18 @@ mailscript test --script=filter.star
 
 # Test with custom headers
 mailscript test --script=filter.star --from=spam@evil.com --subject="Buy Now!" -v
+
+# Analyze a real message with optional local sidecars
+mailscript test --script=examples/open-source-analysis.star \
+  --eml=suspicious.eml \
+  --analyzer=capa=http://127.0.0.1:4471 \
+  --analyzer=oletools=http://127.0.0.1:4472 \
+  --analyzer=ocr=http://127.0.0.1:4473
 ```
+
+Sidecars receive `message/rfc822` at `POST /v1/analyze`. They are called
+concurrently and remain optional: failure is logged as unavailable, never
+reported as a clean result. The JSON contract is documented in `SPEC.md`.
 
 ### `mailscript process` - Mailbox Processing
 Apply rules to mbox/maildir mailboxes:
