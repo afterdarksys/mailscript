@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -39,8 +40,9 @@ var (
 	heloName         string
 	maxSteps         uint64
 	scriptTimeout    time.Duration
-	clamAVURL        string
+	clamAVAddr       string
 	clamAVTimeout    time.Duration
+	clamAVMaxBytes   int64
 	yaraURL          string
 	yaraTimeout      time.Duration
 	yaraMaxBytes     int64
@@ -77,8 +79,9 @@ func addRuntimeFlags(cmd *cobra.Command) {
 
 	f.Uint64Var(&maxSteps, "max-steps", rules.DefaultMaxSteps, "Starlark execution step limit per message")
 	f.DurationVar(&scriptTimeout, "script-timeout", rules.DefaultTimeout, "Wall-clock limit per message")
-	f.StringVar(&clamAVURL, "clamav-url", "", "Private clamav-api-go base URL (e.g. http://clamav-api:8080)")
+	f.StringVar(&clamAVAddr, "clamav-addr", "", "clamd daemon address for native INSTREAM scanning (host:port, e.g. 127.0.0.1:3310)")
 	f.DurationVar(&clamAVTimeout, "clamav-timeout", 30*time.Second, "Maximum ClamAV scan duration")
+	f.Int64Var(&clamAVMaxBytes, "clamav-max-bytes", 26214400, "Maximum RFC 822 message size sent to clamd (0 disables limit)")
 	f.StringVar(&yaraURL, "yara-url", "", "Private YARA scanner sidecar base URL (POST /v1/scan)")
 	f.DurationVar(&yaraTimeout, "yara-timeout", 30*time.Second, "Maximum YARA scan duration")
 	f.Int64Var(&yaraMaxBytes, "yara-max-bytes", 26214400, "Maximum RFC 822 message size sent to the YARA scanner (0 disables limit)")
@@ -131,8 +134,11 @@ func buildRuntime() (*runtime, error) {
 			}
 		}
 	}
-	if clamAVURL != "" {
-		rt.clamav = newClamAVScanner(strings.TrimRight(clamAVURL, "/"), clamAVTimeout)
+	if clamAVAddr != "" {
+		if _, _, err := net.SplitHostPort(clamAVAddr); err != nil {
+			return nil, fmt.Errorf("--clamav-addr must be host:port (e.g. 127.0.0.1:3310): %w", err)
+		}
+		rt.clamav = newClamAVScanner(clamAVAddr, clamAVTimeout, clamAVMaxBytes)
 	}
 	if yaraURL != "" {
 		rt.yara = newYARAScanner(yaraURL, yaraTimeout, yaraMaxBytes)
