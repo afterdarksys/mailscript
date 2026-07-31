@@ -19,8 +19,17 @@ def evaluate():
 
     if apply_content_safety():
         return
-    if apply_ai_policy():
-        return
+
+    # apply_ai_policy() files the message into an AI-review folder when
+    # is_ai_generated() matches, but that classification is driven entirely
+    # by sender-supplied headers (see ai-mail.star / pkg/rules/ai.go) — it is
+    # not a verified trust signal the way authentication or content-safety
+    # results are. Record the classification but do NOT let it short-circuit
+    # past the authentication-score gate or privacy stripping below: doing so
+    # let a single spoofed "X-AI-Agent" header bypass quarantine for a
+    # message that otherwise failed SPF/DKIM/ARC badly enough to score >= 5,
+    # and skip stripping internal headers (X-Internal-Trace etc.) entirely.
+    ai_classified = apply_ai_policy()
 
     # Apply privacy at the trust-boundary handoff, after checks that need the
     # original headers have completed.
@@ -28,6 +37,8 @@ def evaluate():
 
     if get_score() >= 5:
         quarantine()
+        return
+    if ai_classified:
         return
     accept()
 

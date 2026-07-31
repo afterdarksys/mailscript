@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,9 @@ import (
 	mailscriptpb "github.com/afterdarksys/mailscript/pkg/proto"
 	"github.com/afterdarksys/mailscript/pkg/rules"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 type MailScriptServiceServer struct {
@@ -25,15 +29,22 @@ func (s *MailScriptServiceServer) ProcessMessage(_ context.Context, req *mailscr
 	if err != nil {
 		return &mailscriptpb.ProcessResponse{Accepted: false, Reason: "Invalid message headers: " + err.Error(), ProcessingTimeMs: time.Since(start).Milliseconds()}, nil
 	}
+	// This header is a private proxy-to-upstream control signal — see the
+	// identical strip in processWithMailScript (proxy.go). A gRPC caller must
+	// not be able to set it and have the message routed as pre-quarantined.
+	raw = stripHeader(raw, "X-MailScript-Quarantine")
 	msgCtx, err := rules.ParseMessage(raw)
 	if err != nil {
 		return &mailscriptpb.ProcessResponse{Accepted: false, Reason: "Invalid RFC 822 message: " + err.Error(), ProcessingTimeMs: time.Since(start).Milliseconds()}, nil
 	}
-	msgCtx.VirusStatus = "clean"
+	// Matches processWithMailScript's default (proxy.go): "unknown", not
+	// "clean". If runtime.apply below has no scanner configured, this value
+	// is never overwritten — hardcoding "clean" would let any virus_status()
+	// policy check silently pass every message with no AV running at all.
+	msgCtx.VirusStatus = "unknown"
 	msgCtx.SenderDomain = extractDomain(req.From)
 	msgCtx.EnvelopeFrom = req.From
 	msgCtx.EnvelopeTo = append([]string(nil), req.To...)
-	msgCtx.DNSResolved = true
 	if s.proxy.runtime != nil {
 		s.proxy.runtime.apply(msgCtx)
 	}
@@ -137,12 +148,85 @@ func (s *MailScriptServiceServer) Health(context.Context, *mailscriptpb.HealthRe
 	return &mailscriptpb.HealthResponse{Healthy: true, Version: "1.0.0", ScriptPath: s.proxy.scriptName}, nil
 }
 
-func (p *SMTPProxy) startGRPCServer(port int) error {
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+// isLoopbackAddr reports whether addr is a loopback host — the only case in
+// which an unauthenticated gRPC listener is acceptable, since reaching it
+// then requires local access to the host already.
+func isLoopbackAddr(addr string) bool {
+	switch addr {
+	case "127.0.0.1", "::1", "localhost":
+		return true
+	}
+	ip := net.ParseIP(addr)
+	return ip != nil && ip.IsLoopback()
+}
+
+// startGRPCServer starts the gRPC listener on listenAddr:port. Threats: this
+// service can trigger real SMTP delivery to the upstream server
+// (ProcessMessage with ForwardToUpstream) and evaluates arbitrary policy
+// scripts against attacker-supplied message content, so an unauthenticated,
+// non-loopback listener is an open relay/injection point into the mail
+// system it fronts. Fails closed: refuses to start rather than falling back
+// to an unauthenticated listener when authToken is empty and listenAddr
+// isn't loopback-only.
+func (p *SMTPProxy) startGRPCServer(listenAddr string, port int, authToken string) error {
+	if authToken == "" && !isLoopbackAddr(listenAddr) {
+		return fmt.Errorf("refusing to start gRPC server on %s:%d: no auth token configured (--grpc-auth-token or MAILSCRIPT_GRPC_TOKEN) and the address is not loopback-only", listenAddr, port)
+	}
+
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", listenAddr, port))
 	if err != nil {
 		return fmt.Errorf("failed to start gRPC listener: %w", err)
 	}
-	server := grpc.NewServer()
+
+	var opts []grpc.ServerOption
+	if authToken != "" {
+		auth := &grpcTokenAuth{token: authToken}
+		opts = append(opts, grpc.UnaryInterceptor(auth.unaryInterceptor), grpc.StreamInterceptor(auth.streamInterceptor))
+	}
+
+	server := grpc.NewServer(opts...)
 	mailscriptpb.RegisterMailScriptServiceServer(server, &MailScriptServiceServer{proxy: p})
 	return server.Serve(listener)
+}
+
+// grpcTokenAuth enforces a bearer token on every RPC via gRPC metadata:
+// "authorization: Bearer <token>". Comparison is constant-time to avoid
+// leaking the token through response-timing side channels.
+type grpcTokenAuth struct {
+	token string
+}
+
+func (a *grpcTokenAuth) authorize(ctx context.Context) error {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return status.Error(codes.Unauthenticated, "missing authorization metadata")
+	}
+	values := md.Get("authorization")
+	if len(values) == 0 {
+		return status.Error(codes.Unauthenticated, "missing authorization header")
+	}
+	const prefix = "Bearer "
+	presented := values[0]
+	if !strings.HasPrefix(presented, prefix) {
+		return status.Error(codes.Unauthenticated, "authorization header must use the Bearer scheme")
+	}
+	presented = strings.TrimPrefix(presented, prefix)
+	if subtle.ConstantTimeCompare([]byte(presented), []byte(a.token)) != 1 {
+		return status.Error(codes.Unauthenticated, "invalid token")
+	}
+	return nil
+}
+
+func (a *grpcTokenAuth) unaryInterceptor(ctx context.Context, req interface{}, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	if err := a.authorize(ctx); err != nil {
+		return nil, err
+	}
+	return handler(ctx, req)
+}
+
+func (a *grpcTokenAuth) streamInterceptor(srv interface{}, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	if err := a.authorize(ss.Context()); err != nil {
+		return err
+	}
+	return handler(srv, ss)
 }

@@ -90,50 +90,54 @@ func ExecuteEngineWithOptions(scriptSource string, msg *MessageContext, opts Opt
 	}
 	// load("relative.star", ...) lets an administrator split a policy into
 	// small typed modules. Loads are confined to the directory containing the
-	// root script, cached, and cycle-checked.
-	if filepath.IsAbs(opts.Filename) || strings.Contains(opts.Filename, string(filepath.Separator)) {
-		root, err := filepath.Abs(filepath.Dir(opts.Filename))
+	// root script, cached, and cycle-checked. filepath.Dir("filter.star")
+	// (no separator in the name — the common case for --script=filter.star
+	// run from the policy directory) correctly resolves to "." and then to
+	// the current working directory via Abs, so this must run unconditionally:
+	// gating it on "does the filename contain a separator" left load()
+	// silently unavailable — and any load() call failing — for exactly that
+	// common case.
+	root, err := filepath.Abs(filepath.Dir(opts.Filename))
+	if err != nil {
+		return fmt.Errorf("resolve script directory: %w", err)
+	}
+	if resolvedRoot, resolveErr := filepath.EvalSymlinks(root); resolveErr == nil {
+		root = resolvedRoot
+	}
+	cache := map[string]starlark.StringDict{}
+	loading := map[string]bool{}
+	thread.Load = func(loadThread *starlark.Thread, module string) (starlark.StringDict, error) {
+		if filepath.IsAbs(module) || filepath.Ext(module) != ".star" {
+			return nil, fmt.Errorf("load: module must be a relative .star path")
+		}
+		path, err := filepath.Abs(filepath.Join(root, filepath.Clean(module)))
+		if err == nil {
+			path, err = filepath.EvalSymlinks(path)
+		}
 		if err != nil {
-			return fmt.Errorf("resolve script directory: %w", err)
+			return nil, fmt.Errorf("load %q: %w", module, err)
 		}
-		if resolvedRoot, resolveErr := filepath.EvalSymlinks(root); resolveErr == nil {
-			root = resolvedRoot
+		if path != root && !strings.HasPrefix(path, root+string(filepath.Separator)) {
+			return nil, fmt.Errorf("load: module %q escapes policy directory", module)
 		}
-		cache := map[string]starlark.StringDict{}
-		loading := map[string]bool{}
-		thread.Load = func(loadThread *starlark.Thread, module string) (starlark.StringDict, error) {
-			if filepath.IsAbs(module) || filepath.Ext(module) != ".star" {
-				return nil, fmt.Errorf("load: module must be a relative .star path")
-			}
-			path, err := filepath.Abs(filepath.Join(root, filepath.Clean(module)))
-			if err == nil {
-				path, err = filepath.EvalSymlinks(path)
-			}
-			if err != nil {
-				return nil, fmt.Errorf("load %q: %w", module, err)
-			}
-			if path != root && !strings.HasPrefix(path, root+string(filepath.Separator)) {
-				return nil, fmt.Errorf("load: module %q escapes policy directory", module)
-			}
-			if globals, ok := cache[path]; ok {
-				return globals, nil
-			}
-			if loading[path] {
-				return nil, fmt.Errorf("load cycle involving %q", module)
-			}
-			loading[path] = true
-			defer delete(loading, path)
-			source, err := os.ReadFile(path)
-			if err != nil {
-				return nil, fmt.Errorf("load %q: %w", module, err)
-			}
-			globals, err := starlark.ExecFile(loadThread, path, source, predeclared)
-			if err != nil {
-				return nil, err
-			}
-			cache[path] = globals
+		if globals, ok := cache[path]; ok {
 			return globals, nil
 		}
+		if loading[path] {
+			return nil, fmt.Errorf("load cycle involving %q", module)
+		}
+		loading[path] = true
+		defer delete(loading, path)
+		source, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("load %q: %w", module, err)
+		}
+		globals, err := starlark.ExecFile(loadThread, path, source, predeclared)
+		if err != nil {
+			return nil, err
+		}
+		cache[path] = globals
+		return globals, nil
 	}
 	thread.SetMaxExecutionSteps(opts.MaxSteps)
 

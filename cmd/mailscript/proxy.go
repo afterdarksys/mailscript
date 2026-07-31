@@ -36,6 +36,12 @@ Features:
   - Real-time message processing
   - Upstream server forwarding
 
+The gRPC interface can trigger real SMTP delivery through --upstream and
+evaluates your policy script against caller-supplied message content, so it
+binds to 127.0.0.1 by default and refuses to start on any other address
+without an auth token (--grpc-auth-token or MAILSCRIPT_GRPC_TOKEN) — there is
+no unauthenticated non-loopback mode.
+
 Examples:
   # Run SMTP proxy on ports 3025 and 3587
   mailscript proxy --script=filter.star --port=3025,3587
@@ -49,8 +55,8 @@ Examples:
   # Forward to upstream server
   mailscript proxy --script=filter.star --upstream=mail.example.com:25
 
-  # Custom gRPC port
-  mailscript proxy --script=filter.star --grpc-port=50051
+  # Expose gRPC beyond localhost (requires a token)
+  mailscript proxy --script=filter.star --grpc-listen=0.0.0.0 --grpc-auth-token=$(openssl rand -hex 32)
 `,
 	RunE: runProxy,
 }
@@ -63,6 +69,8 @@ var (
 	keyFile           string
 	upstreamServer    string
 	grpcPort          int
+	grpcListenAddr    string
+	grpcAuthToken     string
 	maxConnections    int
 	forwardQuarantine bool
 )
@@ -78,6 +86,8 @@ func init() {
 	proxyCmd.Flags().StringVar(&keyFile, "key", "", "TLS key file")
 	proxyCmd.Flags().StringVar(&upstreamServer, "upstream", "", "Upstream SMTP server (e.g., mail.example.com:25)")
 	proxyCmd.Flags().IntVar(&grpcPort, "grpc-port", 50051, "gRPC port for programmatic access")
+	proxyCmd.Flags().StringVar(&grpcListenAddr, "grpc-listen", "127.0.0.1", "gRPC bind address. Non-loopback addresses require --grpc-auth-token (or MAILSCRIPT_GRPC_TOKEN) — the server refuses to start otherwise")
+	proxyCmd.Flags().StringVar(&grpcAuthToken, "grpc-auth-token", "", "Bearer token required on every gRPC call. Falls back to the MAILSCRIPT_GRPC_TOKEN environment variable if unset")
 	proxyCmd.Flags().IntVar(&maxConnections, "max-connections", 100, "Maximum concurrent connections")
 	proxyCmd.Flags().BoolVar(&forwardQuarantine, "forward-quarantine", false, "Relay quarantined mail upstream with a trusted X-MailScript-Quarantine marker")
 
@@ -132,8 +142,12 @@ func runProxy(cmd *cobra.Command, args []string) error {
 	}
 
 	// Start gRPC server
+	grpcToken := grpcAuthToken
+	if grpcToken == "" {
+		grpcToken = os.Getenv("MAILSCRIPT_GRPC_TOKEN")
+	}
 	go func() {
-		if err := proxy.startGRPCServer(grpcPort); err != nil {
+		if err := proxy.startGRPCServer(grpcListenAddr, grpcPort, grpcToken); err != nil {
 			log.Printf("gRPC server error: %v", err)
 		}
 	}()

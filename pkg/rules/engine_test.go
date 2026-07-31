@@ -26,6 +26,85 @@ func TestPolicyModulesLoadFromRootDirectory(t *testing.T) {
 	}
 }
 
+// TestPolicyModulesLoadWithBareRelativeFilename reproduces the real
+// `mailscript proxy --script=filter.star` invocation, where opts.Filename is
+// a bare name with no path separator and the process's cwd is the policy
+// directory. Gating thread.Load installation on "does Filename contain a
+// separator" left load() unavailable for exactly this case — every message
+// failed with a script error on any policy using load().
+func TestPolicyModulesLoadWithBareRelativeFilename(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "auth.star"), []byte("def apply():\n    add_header(\"X-Module\", \"auth\")\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+
+	ctx := mustParse(t, wellFormed)
+	opts := DefaultOptions()
+	opts.Filename = "main.star" // no path separator, as --script=main.star produces
+	err = ExecuteEngineWithOptions("load(\"auth.star\", \"apply\")\ndef evaluate():\n    apply()\n    accept()\n", ctx, opts)
+	if err != nil {
+		t.Fatalf("ExecuteEngineWithOptions() with a bare relative Filename: %v", err)
+	}
+	if ctx.ModifiedHeaders["X-Module"] != "auth" {
+		t.Fatalf("module did not execute: %v", ctx.ModifiedHeaders)
+	}
+}
+
+// Threats: examples/policy-bundle.star (the shipped reference composition)
+// used to let apply_ai_policy()'s True return short-circuit evaluate()
+// before the authentication-score quarantine gate ran. is_ai_generated()
+// (examples/policies/ai-mail.star, backed by MessageContext.AssessAI) is
+// driven entirely by sender-supplied headers like X-AI-Agent — nothing
+// verifies them. A message with a spoofed X-AI-Agent header sailed through
+// as "AI/Declared" even when the accumulated authentication-failure score
+// would otherwise have triggered quarantine, and the privacy-stripping step
+// after it was skipped too. This test isolates that exact control-flow
+// shape — score check must run regardless of AI classification — against
+// the real ai-mail.star module (so the header-spoofing behavior under test
+// is the genuine, unmocked implementation), without depending on live DNS
+// for the authentication score (add_score is called directly, standing in
+// for what apply_authentication() would add on a real SPF/DKIM/ARC
+// failure).
+func TestAIClassificationDoesNotBypassScoreBasedQuarantine(t *testing.T) {
+	aiModule := filepath.Join("..", "..", "examples", "policies", "ai-mail.star")
+	if _, err := os.Stat(aiModule); err != nil {
+		t.Skipf("examples/policies/ai-mail.star not found: %v", err)
+	}
+
+	root := `
+load("ai-mail.star", "apply_ai_policy")
+
+def evaluate():
+    add_score(7.0, "simulated authentication failure")
+    ai_classified = apply_ai_policy()
+    if get_score() >= 5:
+        quarantine()
+        return
+    if ai_classified:
+        return
+    accept()
+`
+	raw := "From: attacker@example.test\r\nTo: victim@example.test\r\nSubject: hi\r\nX-AI-Agent: yes\r\n\r\nbody\r\n"
+	ctx := mustParse(t, raw)
+	opts := DefaultOptions()
+	opts.Filename = filepath.Join(filepath.Dir(aiModule), "root.star")
+	if err := ExecuteEngineWithOptions(root, ctx, opts); err != nil {
+		t.Fatalf("ExecuteEngineWithOptions() error = %v", err)
+	}
+	if !hasAction(ctx.Actions, "quarantine") {
+		t.Fatalf("a spoofed X-AI-Agent header bypassed quarantine for a message scoring >= 5: actions=%v", ctx.Actions)
+	}
+}
+
 // runScript executes a script against a parsed message and returns the context.
 func runScript(t *testing.T, raw, script string) *MessageContext {
 	t.Helper()
