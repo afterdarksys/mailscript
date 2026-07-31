@@ -698,7 +698,17 @@ func (e *scriptEnv) metadataBuiltins() starlark.StringDict {
 		"av_clean":       nullaryBool("av_clean", func() bool { return msg.AVAvailable && msg.VirusStatus == "clean" }),
 		"av_infected":    nullaryBool("av_infected", func() bool { return msg.VirusStatus == "infected" }),
 		"av_signature":   nullaryStr("av_signature", func() string { return msg.AVSignature }),
-		"body_size":      nullary("body_size", func() starlark.Value { return starlark.MakeInt64(msg.BodySize) }),
+		"yara_available": nullaryBool("yara_available", func() bool { return msg.YARAAvailable }),
+		"yara_matches":   nullaryList("yara_matches", func() []string { return msg.YARAMatches }),
+		"yara_matched": unaryBool("yara_matched", "rule", func(rule string) bool {
+			for _, match := range msg.YARAMatches {
+				if match == rule {
+					return true
+				}
+			}
+			return false
+		}),
+		"body_size": nullary("body_size", func() starlark.Value { return starlark.MakeInt64(msg.BodySize) }),
 		"message_size": nullary("message_size", func() starlark.Value {
 			return starlark.MakeInt64(msg.BodySize + msg.HeaderSize)
 		}),

@@ -39,6 +39,9 @@ var (
 	scriptTimeout   time.Duration
 	clamAVURL       string
 	clamAVTimeout   time.Duration
+	yaraURL         string
+	yaraTimeout     time.Duration
+	yaraMaxBytes    int64
 )
 
 // addRuntimeFlags registers the flags shared by every rule-executing command.
@@ -71,6 +74,9 @@ func addRuntimeFlags(cmd *cobra.Command) {
 	f.DurationVar(&scriptTimeout, "script-timeout", rules.DefaultTimeout, "Wall-clock limit per message")
 	f.StringVar(&clamAVURL, "clamav-url", "", "Private clamav-api-go base URL (e.g. http://clamav-api:8080)")
 	f.DurationVar(&clamAVTimeout, "clamav-timeout", 30*time.Second, "Maximum ClamAV scan duration")
+	f.StringVar(&yaraURL, "yara-url", "", "Private YARA scanner sidecar base URL (POST /v1/scan)")
+	f.DurationVar(&yaraTimeout, "yara-timeout", 30*time.Second, "Maximum YARA scan duration")
+	f.Int64Var(&yaraMaxBytes, "yara-max-bytes", 26214400, "Maximum RFC 822 message size sent to the YARA scanner (0 disables limit)")
 }
 
 // runtime holds the resources built from the shared flags.
@@ -80,6 +86,7 @@ type runtime struct {
 	bert     *ml.BertTokenizer
 	lists    map[string]map[string]bool
 	clamav   *clamAVScanner
+	yara     *yaraScanner
 }
 
 // buildRuntime constructs the shared resources, failing closed on any
@@ -117,6 +124,9 @@ func buildRuntime() (*runtime, error) {
 	}
 	if clamAVURL != "" {
 		rt.clamav = newClamAVScanner(strings.TrimRight(clamAVURL, "/"), clamAVTimeout)
+	}
+	if yaraURL != "" {
+		rt.yara = newYARAScanner(yaraURL, yaraTimeout, yaraMaxBytes)
 	}
 
 	if bertVocabPath != "" {
@@ -189,7 +199,7 @@ func (rt *runtime) apply(ctx *rules.MessageContext) {
 	ctx.Lists = rt.lists
 	ctx.TrustedAuthServs = trustedAuthServ
 	if rt.clamav != nil {
-		result, err := rt.clamav.scan(context.Background(), append(append([]byte{}, ctx.RawHeaderBlock...), ctx.RawBody...))
+		result, err := rt.clamav.scan(context.Background(), rawMessage(ctx))
 		if err != nil {
 			ctx.VirusStatus = "unknown"
 			ctx.LogEntries = append(ctx.LogEntries, "clamav unavailable: "+err.Error())
@@ -201,6 +211,15 @@ func (rt *runtime) apply(ctx *rules.MessageContext) {
 			} else {
 				ctx.VirusStatus = "clean"
 			}
+		}
+	}
+	if rt.yara != nil {
+		matches, err := rt.yara.scan(context.Background(), rawMessage(ctx))
+		if err != nil {
+			ctx.LogEntries = append(ctx.LogEntries, "yara unavailable: "+err.Error())
+		} else {
+			ctx.YARAAvailable = true
+			ctx.YARAMatches = matches
 		}
 	}
 
@@ -216,6 +235,14 @@ func (rt *runtime) apply(ctx *rules.MessageContext) {
 	if verifyAuth && rt.resolver != nil {
 		ctx.VerifyAuth(checkDANE)
 	}
+}
+
+func rawMessage(ctx *rules.MessageContext) []byte {
+	raw := make([]byte, 0, len(ctx.RawHeaderBlock)+len(ctx.RawBody)+4)
+	raw = append(raw, ctx.RawHeaderBlock...)
+	raw = append(raw, '\r', '\n', '\r', '\n')
+	raw = append(raw, ctx.RawBody...)
+	return raw
 }
 
 // readScript loads a rule script, searching the standard locations when no

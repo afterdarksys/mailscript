@@ -50,9 +50,15 @@ def evaluate():
     if total_attachment_size() > 20 * 1024 * 1024:
         quarantine_with_reason("attachment-size-limit")
         return
-    if getvirusstatus() == "infected":
-        quarantine_with_reason("malware-detected")
-        return
+	if getvirusstatus() == "infected":
+		quarantine_with_reason("clamav-malware-detected")
+		return
+	if len(yara_matches()) > 0:
+		quarantine_with_reason("yara-rule-match:" + yara_matches()[0])
+		return
+	if has_attachment() and (not av_available() or not yara_available()):
+		quarantine_with_reason("attachment-scanner-unavailable")
+		return
 
     # Preserve a clear classification for downstream auditing and delivery.
     if is_gomeow_transactional:
