@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -437,7 +439,17 @@ func (s *SMTPSession) handleDATA() {
 		if s.proxy.upstreamServer != "" {
 			if err := s.forwardToUpstream(); err != nil {
 				log.Printf("Upstream forward error: %v", err)
-				s.writeLine("450 Temporary failure")
+				// Relay the upstream's own status class back to the client. A
+				// permanent rejection (5xx) must stay permanent so the sending
+				// MTA bounces instead of retrying for days; only fall back to a
+				// temporary 450 for connection-level failures where we never
+				// learned the upstream's verdict.
+				var ue *upstreamError
+				if errors.As(err, &ue) && ue.code >= 400 && ue.code < 600 {
+					s.writeLine(ue.clientReply())
+				} else {
+					s.writeLine("450 Temporary failure")
+				}
 				return
 			}
 		}
@@ -605,24 +617,51 @@ func (s *SMTPSession) forwardToUpstream() error {
 		}
 	}
 
-	// Send MAIL FROM
+	// Send MAIL FROM. An upstream rejection here (bad sender, rate limit) must
+	// be surfaced with its real code, not swallowed.
 	fmt.Fprintf(conn, "MAIL FROM:<%s>\r\n", s.from)
-	if _, err := reader.ReadString('\n'); err != nil {
+	if code, text, err := readSMTPReply(reader); err != nil {
 		return fmt.Errorf("MAIL FROM error: %w", err)
+	} else if code < 200 || code >= 300 {
+		return &upstreamError{code: code, stage: "MAIL FROM", text: text}
 	}
 
-	// Send RCPT TO for each recipient
+	// Send RCPT TO for each recipient and check each response. Previously the
+	// responses were read and discarded, so an upstream "554 relay denied" at
+	// this stage was ignored and DATA was sent anyway — the rejection only
+	// surfaced, misleadingly, at end-of-DATA. Track which recipients the
+	// upstream accepts; if none are accepted, fail with the last code.
+	var accepted []string
+	var lastRejectCode int
+	var lastRejectText string
 	for _, rcpt := range s.recipients {
 		fmt.Fprintf(conn, "RCPT TO:<%s>\r\n", rcpt)
-		if _, err := reader.ReadString('\n'); err != nil {
+		code, text, err := readSMTPReply(reader)
+		if err != nil {
 			return fmt.Errorf("RCPT TO error: %w", err)
 		}
+		if code >= 200 && code < 300 {
+			accepted = append(accepted, rcpt)
+		} else {
+			lastRejectCode, lastRejectText = code, text
+			log.Printf("upstream rejected recipient %s: %s", rcpt, strings.TrimSpace(text))
+		}
+	}
+	if len(accepted) == 0 {
+		// No deliverable recipients. Surface the upstream's own code so a
+		// permanent (5xx) rejection is not downgraded to a temporary retry.
+		if lastRejectCode == 0 {
+			lastRejectCode = 550
+		}
+		return &upstreamError{code: lastRejectCode, stage: "RCPT TO", text: lastRejectText}
 	}
 
-	// Send DATA
+	// Send DATA and require the 354 go-ahead before streaming the body.
 	fmt.Fprintf(conn, "DATA\r\n")
-	if _, err := reader.ReadString('\n'); err != nil {
+	if code, text, err := readSMTPReply(reader); err != nil {
 		return fmt.Errorf("DATA command error: %w", err)
+	} else if code != 354 {
+		return &upstreamError{code: code, stage: "DATA", text: text}
 	}
 
 	// Send message data
@@ -638,14 +677,13 @@ func (s *SMTPSession) forwardToUpstream() error {
 		return fmt.Errorf("message terminator error: %w", err)
 	}
 
-	// Wait for response
-	response, err := reader.ReadString('\n')
+	// Final response to end-of-data.
+	code, text, err := readSMTPReply(reader)
 	if err != nil {
 		return fmt.Errorf("DATA response error: %w", err)
 	}
-
-	if !strings.HasPrefix(response, "250") {
-		return fmt.Errorf("upstream rejected message: %s", response)
+	if code < 200 || code >= 300 {
+		return &upstreamError{code: code, stage: "end-of-DATA", text: text}
 	}
 
 	// Send QUIT
@@ -653,6 +691,70 @@ func (s *SMTPSession) forwardToUpstream() error {
 
 	log.Printf("Message forwarded successfully to upstream")
 	return nil
+}
+
+// upstreamError carries the SMTP status the upstream returned so the proxy can
+// relay the correct class (permanent vs temporary) back to the client instead
+// of flattening every failure to a generic 450.
+type upstreamError struct {
+	code  int
+	stage string
+	text  string
+}
+
+func (e *upstreamError) Error() string {
+	return fmt.Sprintf("upstream rejected at %s: %d %s", e.stage, e.code, e.message())
+}
+
+// message returns the human-readable text of the upstream reply with the
+// leading status code stripped, so callers can re-emit "<code> <message>"
+// without duplicating the number. Multi-line replies collapse to their final
+// line, which carries the summary.
+func (e *upstreamError) message() string {
+	last := strings.TrimSpace(e.text)
+	if i := strings.LastIndex(last, "\n"); i != -1 {
+		last = strings.TrimSpace(last[i+1:])
+	}
+	// Strip a leading "NNN" or "NNN-"/"NNN " code token if present.
+	if len(last) >= 3 {
+		if _, err := strconv.Atoi(last[:3]); err == nil {
+			last = strings.TrimSpace(strings.TrimLeft(last[3:], "- "))
+		}
+	}
+	if last == "" {
+		last = "rejected by upstream"
+	}
+	return last
+}
+
+// clientReply renders the SMTP line to send back to the client, preserving the
+// upstream's status code so permanent vs temporary class is not lost.
+func (e *upstreamError) clientReply() string {
+	return fmt.Sprintf("%d %s", e.code, e.message())
+}
+
+// readSMTPReply reads one complete SMTP reply, following multi-line
+// continuations ("250-line" ... "250 line"), and returns the numeric code.
+// Reading a single line, as the old code did, would desync the protocol
+// stream the moment an upstream sent a multi-line MAIL FROM/RCPT/DATA reply.
+func readSMTPReply(reader *bufio.Reader) (int, string, error) {
+	var full strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return 0, "", err
+		}
+		full.WriteString(line)
+		// A continuation line has a '-' as the 4th character; the final line
+		// has a space (or is too short to continue).
+		if len(line) < 4 || line[3] != '-' {
+			code := 0
+			if len(line) >= 3 {
+				code, _ = strconv.Atoi(line[:3])
+			}
+			return code, full.String(), nil
+		}
+	}
 }
 
 func dotStuff(raw []byte) []byte {
