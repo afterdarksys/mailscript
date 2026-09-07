@@ -25,6 +25,9 @@ message ProcessRequest {
     map<string, string> headers = 3;
     string body = 4;
     bool forward_to_upstream = 5;  // If true, forward to configured upstream server
+    bytes raw_message = 6; // Original RFC 5322 bytes; mutually exclusive with headers/body
+    string client_ip = 7; // Trusted caller supplies the original SMTP peer for SPF
+    string helo = 8; // Original SMTP HELO/EHLO identity
 }
 
 message ProcessResponse {
@@ -34,6 +37,10 @@ message ProcessResponse {
     repeated string logs = 4;
     map<string, string> modified_headers = 5;
     int64 processing_time_ms = 6;
+    repeated string removed_headers = 7;
+    bytes processed_message = 8; // Message with policy header changes applied
+    int32 smtp_code = 9; // 250, or the temporary/permanent failure code
+    bool forwarded = 10; // True only after upstream accepts end-of-DATA
 }
 
 message StatsRequest {}

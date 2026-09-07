@@ -23,11 +23,11 @@ type MailScriptServiceServer struct {
 	proxy *SMTPProxy
 }
 
-func (s *MailScriptServiceServer) ProcessMessage(_ context.Context, req *mailscriptpb.ProcessRequest) (*mailscriptpb.ProcessResponse, error) {
+func (s *MailScriptServiceServer) ProcessMessage(ctx context.Context, req *mailscriptpb.ProcessRequest) (*mailscriptpb.ProcessResponse, error) {
 	start := time.Now()
 	raw, err := grpcMessage(req)
 	if err != nil {
-		return &mailscriptpb.ProcessResponse{Accepted: false, Reason: "Invalid message headers: " + err.Error(), ProcessingTimeMs: time.Since(start).Milliseconds()}, nil
+		return &mailscriptpb.ProcessResponse{Accepted: false, SmtpCode: 550, Reason: "Invalid message: " + err.Error(), ProcessingTimeMs: time.Since(start).Milliseconds()}, nil
 	}
 	// This header is a private proxy-to-upstream control signal — see the
 	// identical strip in processWithMailScript (proxy.go). A gRPC caller must
@@ -35,7 +35,7 @@ func (s *MailScriptServiceServer) ProcessMessage(_ context.Context, req *mailscr
 	raw = stripHeader(raw, "X-MailScript-Quarantine")
 	msgCtx, err := rules.ParseMessage(raw)
 	if err != nil {
-		return &mailscriptpb.ProcessResponse{Accepted: false, Reason: "Invalid RFC 822 message: " + err.Error(), ProcessingTimeMs: time.Since(start).Milliseconds()}, nil
+		return &mailscriptpb.ProcessResponse{Accepted: false, SmtpCode: 550, Reason: "Invalid RFC 822 message: " + err.Error(), ProcessingTimeMs: time.Since(start).Milliseconds()}, nil
 	}
 	// Matches processWithMailScript's default (proxy.go): "unknown", not
 	// "clean". If runtime.apply below has no scanner configured, this value
@@ -43,32 +43,52 @@ func (s *MailScriptServiceServer) ProcessMessage(_ context.Context, req *mailscr
 	// policy check silently pass every message with no AV running at all.
 	msgCtx.VirusStatus = "unknown"
 	msgCtx.SenderDomain = extractDomain(req.From)
+	msgCtx.SenderIP = req.ClientIp
+	msgCtx.HELO = req.Helo
 	msgCtx.EnvelopeFrom = req.From
+	msgCtx.EnvelopeSenders = []string{req.From}
 	msgCtx.EnvelopeTo = append([]string(nil), req.To...)
 	if s.proxy.runtime != nil {
 		s.proxy.runtime.apply(msgCtx)
 	}
-	if err := rules.ExecuteEngineWithOptions(s.proxy.script, msgCtx, s.proxy.engineOptions()); err != nil {
-		return &mailscriptpb.ProcessResponse{Accepted: false, Reason: "Script error: " + err.Error(), ProcessingTimeMs: time.Since(start).Milliseconds()}, nil
+	if err := s.proxy.executePolicy(msgCtx); err != nil {
+		return &mailscriptpb.ProcessResponse{Accepted: false, SmtpCode: 451, Reason: "Script error: " + err.Error(), ProcessingTimeMs: time.Since(start).Milliseconds()}, nil
 	}
 
-	accepted, reason := grpcDisposition(msgCtx.Actions)
+	d := policyDisposition(msgCtx.Actions, s.proxy.forwardQuarantine || s.proxy.hostAdapter != nil)
+	accepted, reason := d.code == 250, d.reason
+	forwarded := false
+	raw = applyHeaderChanges(raw, msgCtx.RemovedHeaders, msgCtx.ModifiedHeaders)
+	if req.ForwardToUpstream {
+		if action := unsupportedDeliveryAction(msgCtx.Actions); accepted && action != "" && s.proxy.hostAdapter == nil {
+			accepted, reason = false, "Delivery action requires a host adapter: "+action
+		}
+	}
 	if accepted && req.ForwardToUpstream {
 		if s.proxy.upstreamServer == "" {
 			accepted, reason = false, "Upstream forwarding requested but no upstream is configured"
 		} else {
-			raw = applyHeaderChanges(raw, msgCtx.RemovedHeaders, msgCtx.ModifiedHeaders)
-			session := &SMTPSession{proxy: s.proxy, from: req.From, recipients: append([]string(nil), req.To...), data: raw}
-			if session.from == "" || len(session.recipients) == 0 {
-				accepted, reason = false, "Upstream forwarding requires an envelope sender and recipient"
-			} else if err := session.forwardToUpstream(); err != nil {
+			if d.quarantine {
+				raw = prependHeader(raw, "X-MailScript-Quarantine", "true")
+			}
+			session := &SMTPSession{actions: msgCtx.Actions, clientIP: req.ClientIp, helo: req.Helo, proxy: s.proxy, from: req.From, recipients: append([]string(nil), req.To...), data: raw}
+			if err := validateEnvelope(session.from, session.recipients); err != nil {
+				accepted, reason = false, "Invalid upstream envelope"
+			} else if err := session.deliver(ctx); err != nil {
 				accepted, reason = false, "Upstream forward failed: "+err.Error()
+				d.code = 451
+				if ue, ok := err.(*upstreamError); ok && ue.code >= 400 && ue.code <= 599 {
+					d.code = ue.code
+				}
+			} else {
+				forwarded = true
 			}
 		}
 	}
 
 	s.proxy.stats.Lock()
 	s.proxy.stats.MessagesProcessed++
+	s.proxy.stats.BytesProcessed += int64(len(raw))
 	if accepted {
 		s.proxy.stats.MessagesAccepted++
 	} else {
@@ -76,25 +96,34 @@ func (s *MailScriptServiceServer) ProcessMessage(_ context.Context, req *mailscr
 	}
 	s.proxy.stats.Unlock()
 
+	if !accepted && d.code == 250 {
+		d.code = 451
+	}
 	return &mailscriptpb.ProcessResponse{
+		RemovedHeaders: msgCtx.RemovedHeaders, ProcessedMessage: raw, SmtpCode: int32(d.code), Forwarded: forwarded,
 		Accepted: accepted, Reason: reason, Actions: msgCtx.Actions, Logs: msgCtx.LogEntries,
 		ModifiedHeaders: msgCtx.ModifiedHeaders, ProcessingTimeMs: time.Since(start).Milliseconds(),
 	}, nil
 }
 
 func grpcDisposition(actions []string) (bool, string) {
-	for _, action := range actions {
-		switch {
-		case action == "discard", action == "drop", action == "bounce":
-			return false, "Message rejected by " + action + " action"
-		case action == "quarantine", strings.HasPrefix(action, "fileinto:Spam"):
-			return false, "Message quarantined by policy"
-		}
-	}
-	return true, "Message accepted"
+	d := policyDisposition(actions, false)
+	return d.code == 250, d.reason
 }
 
 func grpcMessage(req *mailscriptpb.ProcessRequest) ([]byte, error) {
+	if req == nil {
+		return nil, fmt.Errorf("missing request")
+	}
+	if req.ClientIp != "" && net.ParseIP(req.ClientIp) == nil {
+		return nil, fmt.Errorf("invalid client IP")
+	}
+	if len(req.RawMessage) > 0 {
+		if len(req.Headers) > 0 || req.Body != "" {
+			return nil, fmt.Errorf("raw_message cannot be combined with headers or body")
+		}
+		return append([]byte(nil), req.RawMessage...), nil
+	}
 	var message strings.Builder
 	// Map iteration is randomized; stable ordering makes forwarding tests and
 	// DKIM behavior deterministic for API-created messages.
@@ -145,7 +174,7 @@ func (s *MailScriptServiceServer) GetStats(context.Context, *mailscriptpb.StatsR
 }
 
 func (s *MailScriptServiceServer) Health(context.Context, *mailscriptpb.HealthRequest) (*mailscriptpb.HealthResponse, error) {
-	return &mailscriptpb.HealthResponse{Healthy: true, Version: "1.0.0", ScriptPath: s.proxy.scriptName}, nil
+	return &mailscriptpb.HealthResponse{Healthy: true, Version: Version, ScriptPath: s.proxy.scriptName}, nil
 }
 
 // isLoopbackAddr reports whether addr is a loopback host — the only case in
@@ -169,13 +198,22 @@ func isLoopbackAddr(addr string) bool {
 // to an unauthenticated listener when authToken is empty and listenAddr
 // isn't loopback-only.
 func (p *SMTPProxy) startGRPCServer(listenAddr string, port int, authToken string) error {
+	server, listener, err := p.newGRPCServer(listenAddr, port, authToken)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	return server.Serve(listener)
+}
+
+func (p *SMTPProxy) newGRPCServer(listenAddr string, port int, authToken string) (*grpc.Server, net.Listener, error) {
 	if authToken == "" && !isLoopbackAddr(listenAddr) {
-		return fmt.Errorf("refusing to start gRPC server on %s:%d: no auth token configured (--grpc-auth-token or MAILSCRIPT_GRPC_TOKEN) and the address is not loopback-only", listenAddr, port)
+		return nil, nil, fmt.Errorf("refusing to start gRPC server on %s:%d: no auth token configured (--grpc-auth-token or MAILSCRIPT_GRPC_TOKEN) and the address is not loopback-only", listenAddr, port)
 	}
 
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", listenAddr, port))
+	listener, err := net.Listen("tcp", net.JoinHostPort(listenAddr, fmt.Sprint(port)))
 	if err != nil {
-		return fmt.Errorf("failed to start gRPC listener: %w", err)
+		return nil, nil, fmt.Errorf("failed to start gRPC listener: %w", err)
 	}
 
 	var opts []grpc.ServerOption
@@ -186,7 +224,7 @@ func (p *SMTPProxy) startGRPCServer(listenAddr string, port int, authToken strin
 
 	server := grpc.NewServer(opts...)
 	mailscriptpb.RegisterMailScriptServiceServer(server, &MailScriptServiceServer{proxy: p})
-	return server.Serve(listener)
+	return server, listener, nil
 }
 
 // grpcTokenAuth enforces a bearer token on every RPC via gRPC metadata:

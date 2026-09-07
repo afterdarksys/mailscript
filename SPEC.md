@@ -491,6 +491,61 @@ DNSSEC-validating one.
 
 ## 8. Builtin reference
 
+### Field matching, language and attachment types
+
+| Builtin | Behavior |
+|---|---|
+| `contains(field, substring)` | Case-sensitive literal substring test; true if any selected value contains it |
+| `matches_regex(field, pattern)` | RE2 search against each selected value; use anchors for whole-value matching and `(?i)` for case-insensitivity; malformed patterns raise an error |
+| `count_occurrences(field, substring)` | Sum of literal, case-sensitive, non-overlapping occurrences across selected values; empty substring raises an error |
+| `has_language(lang_code)` | True when a decoded inline text part is reliably classified as that language |
+| `attachment_types()` | List of declared MIME media types, in attachment order, one per attachment; duplicate types retained |
+
+`field` is a **selector**, not literal text. Header names such as `subject`,
+`From` or `X-Classification` are case-insensitive and select all occurrences.
+Special selectors are `body` (the existing `search_text()` view), `text_body`,
+`html_body`, `raw_body`, `envelope_from`, and `envelope_to`. Prefix a header
+with `header:` to avoid a reserved-name collision, e.g. `header:Body`.
+Header values are unfolded; matches never span separate occurrences. Missing
+headers select no values, producing false/zero. Empty substring matches any
+existing selected value for `contains`. Invalid selectors raise an error.
+These functions inspect the original message, consistent with header getters.
+For literal text, existing `regex_match(pattern, text)`, `count_matches(pattern,
+text)` and Starlark string operations remain available unchanged.
+
+`has_language` uses [whatlanggo](https://github.com/abadojack/whatlanggo) v1.0.1
+locally, with its reliable-confidence threshold. It accepts supported ISO 639-1
+or ISO 639-3 codes, case-insensitively (`en`, `eng`, `fr`, etc.); unsupported
+codes and regional tags such as `en-US` raise an error. It ignores declared
+`Content-Language`, skips attachment bodies, decodes supported charsets, strips
+HTML tags and decodes entities. Detection uses at most 64 KiB of transfer-decoded
+text-part input across at most 64 nonempty inline text parts in MIME order,
+requires at least 20 letters per sampled part,
+and is cached per evaluation. Different text parts can match different languages.
+It classifies each sampled part's predominant language; it does not promise to
+find every language mixed within one part. False can mean absent, insufficient,
+unreliable or outside the inspected sample. It is a filtering signal, not proof
+that all content was inspected. HTML conversion does not simulate a browser.
+
+`attachment_types()` follows the attachment inventory: explicit attachments and
+named inline parts, including single-part messages. Media types are lowercase
+without parameters. No attachments returns `[]`. These are declared types,
+not magic-byte verification; malformed MIME may yield an incomplete inventory.
+
+```python
+def evaluate():
+    if contains("subject", "Invoice") and matches_regex("body", r"(?i)bank account"):
+        screen_to("finance-review@example.com")
+    if count_occurrences("body", "urgent") > 3:
+        add_score(2, "repeated urgency")
+    if has_language("fr"):
+        add_header("X-Review-Language", "fr")
+    if "application/x-msdownload" in attachment_types():
+        quarantine()
+        return
+    accept()
+```
+
 262 builtins in the current release. `mailscript builtins` prints the exact
 set for your binary.
 

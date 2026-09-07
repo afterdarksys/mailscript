@@ -2,7 +2,7 @@ package main
 
 import (
 	"bufio"
-	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -10,9 +10,13 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/afterdarksys/mailscript/pkg/rules"
@@ -46,36 +50,41 @@ no unauthenticated non-loopback mode.
 
 Examples:
   # Run SMTP proxy on ports 3025 and 3587
-  mailscript proxy --script=filter.star --port=3025,3587
+  mailscript proxy --script=filter.star --upstream=127.0.0.1:2525 --port=3025,3587
 
   # Enable TLS
-  mailscript proxy --script=filter.star --enable-tls --cert=cert.pem --key=key.pem
+  mailscript proxy --script=filter.star --upstream=127.0.0.1:2525 --enable-tls --cert=cert.pem --key=key.pem
 
   # Disable TLS
-  mailscript proxy --script=filter.star --disable-tls
+  mailscript proxy --script=filter.star --upstream=127.0.0.1:2525 --disable-tls
 
   # Forward to upstream server
   mailscript proxy --script=filter.star --upstream=mail.example.com:25
 
   # Expose gRPC beyond localhost (requires a token)
-  mailscript proxy --script=filter.star --grpc-listen=0.0.0.0 --grpc-auth-token=$(openssl rand -hex 32)
+  mailscript proxy --script=filter.star --upstream=127.0.0.1:2525 --grpc-listen=0.0.0.0 --grpc-auth-token=$(openssl rand -hex 32)
 `,
 	RunE: runProxy,
 }
 
 var (
-	proxyPorts        []int
-	enableTLS         bool
-	disableTLS        bool
-	certFile          string
-	keyFile           string
-	upstreamServer    string
-	grpcPort          int
-	grpcListenAddr    string
-	grpcAuthToken     string
-	maxConnections    int
-	forwardQuarantine bool
+	proxyPorts                                                 []int
+	enableTLS                                                  bool
+	disableTLS                                                 bool
+	certFile                                                   string
+	keyFile                                                    string
+	upstreamServer                                             string
+	grpcPort                                                   int
+	grpcListenAddr                                             string
+	grpcAuthToken                                              string
+	maxConnections                                             int
+	smtpListenAddr                                             string
+	forwardQuarantine                                          bool
+	upstreamTLSMode, upstreamTLSName, upstreamCA, upstreamUser string
+	submission                                                 bool
 )
+
+var deliveryAdapterURL string
 
 func init() {
 	rootCmd.AddCommand(proxyCmd)
@@ -90,15 +99,45 @@ func init() {
 	proxyCmd.Flags().IntVar(&grpcPort, "grpc-port", 50051, "gRPC port for programmatic access")
 	proxyCmd.Flags().StringVar(&grpcListenAddr, "grpc-listen", "127.0.0.1", "gRPC bind address. Non-loopback addresses require --grpc-auth-token (or MAILSCRIPT_GRPC_TOKEN) — the server refuses to start otherwise")
 	proxyCmd.Flags().StringVar(&grpcAuthToken, "grpc-auth-token", "", "Bearer token required on every gRPC call. Falls back to the MAILSCRIPT_GRPC_TOKEN environment variable if unset")
+	proxyCmd.Flags().StringVar(&smtpListenAddr, "listen", "127.0.0.1", "SMTP bind address")
 	proxyCmd.Flags().IntVar(&maxConnections, "max-connections", 100, "Maximum concurrent connections")
 	proxyCmd.Flags().BoolVar(&forwardQuarantine, "forward-quarantine", false, "Relay quarantined mail upstream with a trusted X-MailScript-Quarantine marker")
 
+	proxyCmd.Flags().StringVar(&upstreamTLSMode, "upstream-tls", "plain", "Backend transport: plain, starttls (required), or tls (implicit)")
+	proxyCmd.Flags().StringVar(&upstreamTLSName, "upstream-tls-name", "", "Backend TLS certificate hostname (default upstream hostname)")
+	proxyCmd.Flags().StringVar(&upstreamCA, "upstream-ca", "", "Additional PEM root certificates for backend TLS")
+	proxyCmd.Flags().StringVar(&upstreamUser, "upstream-user", "", "Backend service account; password from MAILSCRIPT_UPSTREAM_PASSWORD")
+	proxyCmd.Flags().BoolVar(&submission, "submission", false, "Require incoming TLS and AUTH PLAIN verified by the backend")
+	proxyCmd.Flags().StringVar(&deliveryAdapterURL, "delivery-adapter", "", "Host delivery API URL; token from MAILSCRIPT_DELIVERY_TOKEN")
 	addRuntimeFlags(proxyCmd)
 
 	proxyCmd.MarkFlagRequired("script")
 }
 
 func runProxy(cmd *cobra.Command, args []string) error {
+	if upstreamServer == "" {
+		return fmt.Errorf("--upstream is required: the proxy has no local delivery queue")
+	}
+	if _, _, err := net.SplitHostPort(upstreamServer); err != nil {
+		return fmt.Errorf("invalid --upstream: %w", err)
+	}
+	if maxConnections <= 0 {
+		return fmt.Errorf("--max-connections must be positive")
+	}
+	token := grpcAuthToken
+	if token == "" {
+		token = os.Getenv("MAILSCRIPT_GRPC_TOKEN")
+	}
+	if token == "" && !isLoopbackAddr(grpcListenAddr) {
+		return fmt.Errorf("non-loopback gRPC requires an auth token")
+	}
+	upCfg, err := loadUpstreamConfig(upstreamTLSMode, upstreamTLSName, upstreamCA, upstreamUser)
+	if err != nil {
+		return err
+	}
+	if submission && (!enableTLS || disableTLS || upstreamTLSMode == "plain") {
+		return fmt.Errorf("--submission requires incoming TLS and encrypted upstream transport")
+	}
 	// Read script
 	scriptContent, err := os.ReadFile(scriptPath)
 	if err != nil {
@@ -111,6 +150,9 @@ func runProxy(cmd *cobra.Command, args []string) error {
 	}
 
 	proxy := &SMTPProxy{
+		upstreamConfig:    upCfg,
+		submission:        submission,
+		listenAddr:        smtpListenAddr,
 		script:            string(scriptContent),
 		scriptName:        scriptPath,
 		runtime:           rt,
@@ -123,6 +165,15 @@ func runProxy(cmd *cobra.Command, args []string) error {
 		},
 	}
 
+	if err := proxy.reloadPolicy(); err != nil {
+		return fmt.Errorf("invalid policy: %w", err)
+	}
+	if deliveryAdapterURL != "" {
+		proxy.hostAdapter, err = newHostAdapter(deliveryAdapterURL, os.Getenv("MAILSCRIPT_DELIVERY_TOKEN"))
+		if err != nil {
+			return fmt.Errorf("delivery adapter: %w", err)
+		}
+	}
 	// Load TLS config if enabled
 	if enableTLS && !disableTLS {
 		if certFile == "" || keyFile == "" {
@@ -143,44 +194,63 @@ func runProxy(cmd *cobra.Command, args []string) error {
 		fmt.Println("WARNING: TLS disabled, running in plaintext mode")
 	}
 
-	// Start gRPC server
-	grpcToken := grpcAuthToken
-	if grpcToken == "" {
-		grpcToken = os.Getenv("MAILSCRIPT_GRPC_TOKEN")
+	// Bind every endpoint before reporting readiness.
+	server, grpcListener, err := proxy.newGRPCServer(grpcListenAddr, grpcPort, token)
+	if err != nil {
+		return err
 	}
-	go func() {
-		if err := proxy.startGRPCServer(grpcListenAddr, grpcPort, grpcToken); err != nil {
-			log.Printf("gRPC server error: %v", err)
+	defer grpcListener.Close()
+	defer server.Stop()
+	listeners := make([]net.Listener, 0, len(proxyPorts))
+	defer func() {
+		for _, listener := range listeners {
+			listener.Close()
 		}
 	}()
-
-	// Start SMTP listeners
-	var wg sync.WaitGroup
 	for _, port := range proxyPorts {
-		wg.Add(1)
-		go func(p int) {
-			defer wg.Done()
-			if err := proxy.listenSMTP(p); err != nil {
-				log.Printf("SMTP listener error on port %d: %v", p, err)
+		listener, err := net.Listen("tcp", net.JoinHostPort(smtpListenAddr, strconv.Itoa(port)))
+		if err != nil {
+			return err
+		}
+		listeners = append(listeners, listener)
+	}
+	failures := make(chan error, len(listeners)+1)
+	go func() { failures <- server.Serve(grpcListener) }()
+	for _, listener := range listeners {
+		go func(l net.Listener) { failures <- proxy.serveSMTP(l) }(listener)
+	}
+	log.Printf("MailScript ready: SMTP %s:%v, upstream %s", smtpListenAddr, proxyPorts, upstreamServer)
+	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	reload := make(chan os.Signal, 1)
+	signal.Notify(reload, syscall.SIGHUP)
+	defer signal.Stop(reload)
+	defer proxy.drain(listeners, server, 30*time.Second)
+	for {
+		select {
+		case err := <-failures:
+			return err
+		case <-ctx.Done():
+			return nil
+		case <-reload:
+			if err := proxy.reloadPolicy(); err != nil {
+				log.Printf("Policy reload rejected; retaining previous snapshot: %v", err)
+			} else {
+				log.Printf("Policy reloaded")
 			}
-		}(port)
+		}
 	}
-
-	fmt.Printf("MailScript SMTP proxy started\n")
-	fmt.Printf("Script:     %s\n", scriptPath)
-	fmt.Printf("SMTP ports: %v\n", proxyPorts)
-	fmt.Printf("gRPC port:  %d\n", grpcPort)
-	if upstreamServer != "" {
-		fmt.Printf("Upstream:   %s\n", upstreamServer)
-	}
-	fmt.Println()
-	fmt.Println("Press Ctrl+C to stop")
-
-	wg.Wait()
-	return nil
 }
 
 type SMTPProxy struct {
+	hostAdapter       *hostAdapter
+	policy            atomic.Pointer[rules.Policy]
+	sessions          sync.WaitGroup
+	active            map[net.Conn]struct{}
+	draining          bool
+	upstreamConfig    upstreamConfig
+	submission        bool
+	listenAddr        string
 	script            string
 	scriptName        string
 	runtime           *runtime
@@ -215,27 +285,54 @@ func (p *SMTPProxy) engineOptions() rules.Options {
 }
 
 func (p *SMTPProxy) listenSMTP(port int) error {
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	listener, err := net.Listen("tcp", net.JoinHostPort(p.listenAddr, strconv.Itoa(port)))
 	if err != nil {
 		return fmt.Errorf("failed to listen on port %d: %w", port, err)
 	}
 	defer listener.Close()
 
-	log.Printf("SMTP listening on port %d", port)
+	return p.serveSMTP(listener)
+}
 
+func (p *SMTPProxy) serveSMTP(listener net.Listener) error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("Accept error: %v", err)
-			continue
+			return err
 		}
 
 		p.stats.Lock()
 		p.stats.TotalConnections++
+		if p.maxConnections > 0 && p.stats.ActiveConnections >= int64(p.maxConnections) {
+			p.stats.Unlock()
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			fmt.Fprint(conn, "421 Too many connections\r\n")
+			conn.Close()
+			continue
+		}
 		p.stats.ActiveConnections++
 		p.stats.Unlock()
 
-		go p.handleSMTPConnection(conn)
+		p.connMutex.Lock()
+		if p.draining {
+			p.connMutex.Unlock()
+			conn.Close()
+			p.stats.Lock()
+			p.stats.ActiveConnections--
+			p.stats.Unlock()
+			return net.ErrClosed
+		}
+		if p.active == nil {
+			p.active = make(map[net.Conn]struct{})
+		}
+		p.active[conn] = struct{}{}
+		p.sessions.Add(1)
+		p.connMutex.Unlock()
+		go func() {
+			defer p.sessions.Done()
+			defer func() { p.connMutex.Lock(); delete(p.active, conn); p.connMutex.Unlock() }()
+			p.handleSMTPConnection(conn)
+		}()
 	}
 }
 
@@ -254,8 +351,12 @@ func (p *SMTPProxy) handleSMTPConnection(conn net.Conn) {
 
 	// Track connection
 	p.connMutex.Lock()
+	if p.connections == nil {
+		p.connections = make(map[string]time.Time)
+	}
 	p.connections[remoteAddr] = time.Now()
 	p.connMutex.Unlock()
+	defer func() { p.connMutex.Lock(); delete(p.connections, remoteAddr); p.connMutex.Unlock() }()
 
 	session := &SMTPSession{
 		conn:   conn,
@@ -266,12 +367,14 @@ func (p *SMTPProxy) handleSMTPConnection(conn net.Conn) {
 		session.clientIP = host
 	}
 
+	defer session.closeUpstream()
 	// Send greeting
 	session.writeLine("220 MailScript SMTP Proxy ready")
 
 	// Handle SMTP commands
 	for {
-		line, err := session.reader.ReadString('\n')
+		conn.SetDeadline(time.Now().Add(5 * time.Minute))
+		line, err := readWireLine(session.reader, 4096)
 		if err != nil {
 			if err != io.EOF {
 				log.Printf("Read error: %v", err)
@@ -292,10 +395,14 @@ func (p *SMTPProxy) handleSMTPConnection(conn net.Conn) {
 		cmd := strings.ToUpper(parts[0])
 
 		if verbose {
-			log.Printf("<- %s: %s", remoteAddr, line)
+			if cmd != "AUTH" {
+				log.Printf("<- %s: %s", remoteAddr, line)
+			}
 		}
 
 		switch cmd {
+		case "AUTH":
+			session.handleAUTH(parts)
 		case "HELO":
 			session.handleHELO(parts)
 		case "EHLO":
@@ -322,6 +429,7 @@ func (p *SMTPProxy) handleSMTPConnection(conn net.Conn) {
 }
 
 type SMTPSession struct {
+	actions    []string
 	conn       net.Conn
 	reader     *bufio.Reader
 	proxy      *SMTPProxy
@@ -331,8 +439,14 @@ type SMTPSession struct {
 	// helo is the name the client announced, and clientIP the address it
 	// connected from. SPF authenticates the envelope against these, not
 	// against anything inside the message.
-	helo     string
-	clientIP string
+	helo                   string
+	clientIP               string
+	mailSet                bool
+	tlsActive              bool
+	replyCode              int
+	upstream               *upstreamTransaction
+	authenticated          bool
+	authUser, authPassword string
 }
 
 func (s *SMTPSession) writeLine(msg string) {
@@ -347,6 +461,7 @@ func (s *SMTPSession) handleHELO(parts []string) {
 		s.writeLine("501 Syntax: HELO hostname")
 		return
 	}
+	s.resetTransaction()
 	s.helo = parts[1]
 	s.writeLine("250 MailScript SMTP Proxy")
 }
@@ -357,62 +472,116 @@ func (s *SMTPSession) handleEHLO(parts []string) {
 		return
 	}
 
+	s.resetTransaction()
 	s.helo = parts[1]
 	s.writeLine("250-MailScript SMTP Proxy")
 	s.writeLine("250-PIPELINING")
 	s.writeLine("250-8BITMIME")
-	if s.proxy.tlsConfig != nil {
+	if s.proxy.tlsConfig != nil && !s.tlsActive {
 		s.writeLine("250-STARTTLS")
+	}
+	if s.proxy.submission && s.tlsActive && !s.authenticated {
+		s.writeLine("250-AUTH PLAIN")
 	}
 	s.writeLine("250 SIZE 52428800") // 50MB max
 }
 
 func (s *SMTPSession) handleMAIL(line string) {
-	// Extract email from MAIL FROM:<email>
-	start := strings.Index(line, "<")
-	end := strings.Index(line, ">")
-	if start == -1 || end == -1 {
-		s.writeLine("501 Syntax: MAIL FROM:<address>")
+	if s.helo == "" {
+		s.writeLine("503 Send HELO or EHLO first")
 		return
 	}
-
-	s.from = line[start+1 : end]
+	if s.proxy.submission && !s.authenticated {
+		s.writeLine("530 Authentication required")
+		return
+	}
+	if s.mailSet {
+		s.writeLine("503 Transaction already started")
+		return
+	}
+	address, err := parseSMTPPath(line, "MAIL FROM:", true)
+	if err != nil {
+		s.writeLine("501 Invalid MAIL FROM")
+		return
+	}
+	s.resetTransaction()
+	s.from = address
+	if s.proxy.upstreamServer != "" {
+		if err := s.beginUpstream(); err != nil {
+			s.resetTransaction()
+			s.upstreamFailure(err)
+			return
+		}
+	}
+	s.mailSet = true
 	s.writeLine("250 OK")
 }
 
 func (s *SMTPSession) handleRCPT(line string) {
-	start := strings.Index(line, "<")
-	end := strings.Index(line, ">")
-	if start == -1 || end == -1 {
-		s.writeLine("501 Syntax: RCPT TO:<address>")
+	if !s.mailSet {
+		s.writeLine("503 Send MAIL first")
 		return
 	}
-
-	recipient := line[start+1 : end]
-	s.recipients = append(s.recipients, recipient)
+	address, err := parseSMTPPath(line, "RCPT TO:", false)
+	if err != nil {
+		s.writeLine("501 Invalid RCPT TO")
+		return
+	}
+	if len(s.recipients) >= 100 {
+		s.writeLine("452 Too many recipients")
+		return
+	}
+	if s.upstream != nil {
+		code, text, err := s.upstream.command("RCPT TO:<"+address+">", 0)
+		if err != nil {
+			s.resetTransaction()
+			s.upstreamFailure(err)
+			return
+		}
+		if code != 250 && code != 251 && code != 252 {
+			s.upstreamFailure(&upstreamError{code: code, stage: "RCPT TO", text: text})
+			return
+		}
+	}
+	s.recipients = append(s.recipients, address)
 	s.writeLine("250 OK")
 }
 
 func (s *SMTPSession) handleDATA() {
-	if s.from == "" || len(s.recipients) == 0 {
+	if !s.mailSet || len(s.recipients) == 0 {
 		s.writeLine("503 Error: need MAIL command")
 		return
 	}
 
+	defer s.resetTransaction()
 	s.writeLine("354 End data with <CR><LF>.<CR><LF>")
 
 	var data strings.Builder
 	for {
-		line, err := s.reader.ReadString('\n')
+		line, err := readWireLine(s.reader, 64*1024)
 		if err != nil {
 			log.Printf("DATA read error: %v", err)
+			s.conn.Close()
 			return
 		}
 
-		if line == ".\r\n" || line == ".\n" {
+		if !strings.HasSuffix(line, "\r\n") || strings.ContainsRune(strings.TrimSuffix(line, "\r\n"), '\r') {
+			s.writeLine("550 DATA requires CRLF line endings")
+			s.conn.Close()
+			return
+		}
+		if line == ".\r\n" {
 			break
 		}
 
+		if strings.HasPrefix(line, ".") {
+			line = line[1:]
+		}
+		if data.Len()+len(line) > 50*1024*1024 {
+			s.writeLine("552 Message too large")
+			s.conn.Close()
+			return
+		}
 		data.WriteString(line)
 	}
 
@@ -428,40 +597,43 @@ func (s *SMTPSession) handleDATA() {
 		if quarantined {
 			s.data = prependHeader(s.data, "X-MailScript-Quarantine", "true")
 		}
-		s.proxy.stats.MessagesAccepted++
 	} else {
 		s.proxy.stats.MessagesRejected++
 	}
 	s.proxy.stats.Unlock()
 
 	if accepted {
-		// Forward to upstream if configured
-		if s.proxy.upstreamServer != "" {
-			if err := s.forwardToUpstream(); err != nil {
-				log.Printf("Upstream forward error: %v", err)
-				// Relay the upstream's own status class back to the client. A
-				// permanent rejection (5xx) must stay permanent so the sending
-				// MTA bounces instead of retrying for days; only fall back to a
-				// temporary 450 for connection-level failures where we never
-				// learned the upstream's verdict.
-				var ue *upstreamError
-				if errors.As(err, &ue) && ue.code >= 400 && ue.code < 600 {
-					s.writeLine(ue.clientReply())
-				} else {
-					s.writeLine("450 Temporary failure")
-				}
-				return
+		// Acceptance transfers responsibility only after upstream delivery.
+		if err := s.deliver(context.Background()); err != nil {
+			log.Printf("Upstream forward error: %v", err)
+			s.proxy.stats.Lock()
+			s.proxy.stats.MessagesRejected++
+			s.proxy.stats.Unlock()
+			// Relay the upstream's own status class back to the client. A
+			// permanent rejection (5xx) must stay permanent so the sending
+			// MTA bounces instead of retrying for days; only fall back to a
+			// temporary 450 for connection-level failures where we never
+			// learned the upstream's verdict.
+			var ue *upstreamError
+			if errors.As(err, &ue) && ue.code >= 400 && ue.code < 600 {
+				s.writeLine(ue.clientReply())
+			} else {
+				s.writeLine("450 Temporary failure")
 			}
+			return
 		}
+		s.proxy.stats.Lock()
+		s.proxy.stats.MessagesAccepted++
+		s.proxy.stats.Unlock()
 		s.writeLine("250 OK: Message accepted")
 	} else {
-		s.writeLine(fmt.Sprintf("550 Rejected: %s", reason))
+		code := s.replyCode
+		if code == 0 {
+			code = 550
+		}
+		s.writeLine(fmt.Sprintf("%d %s", code, smtpReplyText(reason)))
 	}
 
-	// Reset for next message
-	s.from = ""
-	s.recipients = nil
-	s.data = nil
 }
 
 func (s *SMTPSession) processWithMailScript() (bool, bool, string) {
@@ -496,33 +668,20 @@ func (s *SMTPSession) processWithMailScript() (bool, bool, string) {
 	}
 
 	// Execute script
-	if err := rules.ExecuteEngineWithOptions(s.proxy.script, ctx, s.proxy.engineOptions()); err != nil {
+	if err := s.proxy.executePolicy(ctx); err != nil {
 		log.Printf("MailScript error: %v", err)
+		s.replyCode = 451
 		return false, false, "Script execution error"
 	}
 	s.data = applyHeaderChanges(s.data, ctx.RemovedHeaders, ctx.ModifiedHeaders)
 
-	// Check actions
-	for _, action := range ctx.Actions {
-		switch {
-		case action == "discard":
-			return false, false, "Message discarded by filter"
-		case action == "quarantine":
-			if s.proxy.forwardQuarantine {
-				return true, true, ""
-			}
-			return false, false, "Message quarantined"
-		case strings.HasPrefix(action, "fileinto:Spam"):
-			return false, false, "Classified as spam"
-		case action == "bounce":
-			return false, false, "Message bounced"
-		case action == "drop":
-			return false, false, "Message dropped"
-		}
+	s.actions = append([]string(nil), ctx.Actions...)
+	d := policyDisposition(ctx.Actions, s.proxy.forwardQuarantine || s.proxy.hostAdapter != nil)
+	if action := unsupportedDeliveryAction(ctx.Actions); d.code == 250 && action != "" && s.proxy.hostAdapter == nil {
+		d = deliveryDisposition{code: 451, reason: "Delivery action requires a host adapter: " + action}
 	}
-
-	// Default accept
-	return true, false, ""
+	s.replyCode = d.code
+	return d.code == 250, d.quarantine, d.reason
 }
 
 func stripHeader(raw []byte, name string) []byte {
@@ -564,8 +723,13 @@ func prependHeader(raw []byte, name, value string) []byte {
 }
 
 func applyModifiedHeaders(raw []byte, headers map[string]string) []byte {
-	for name, value := range headers {
-		raw = prependHeader(raw, name, value)
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		raw = prependHeader(raw, name, headers[name])
 	}
 	return raw
 }
@@ -575,122 +739,6 @@ func applyHeaderChanges(raw []byte, removed []string, added map[string]string) [
 		raw = stripHeader(raw, name)
 	}
 	return applyModifiedHeaders(raw, added)
-}
-
-func (s *SMTPSession) forwardToUpstream() error {
-	if s.proxy.upstreamServer == "" {
-		return nil
-	}
-
-	log.Printf("Forwarding to upstream: %s", s.proxy.upstreamServer)
-
-	// Connect to upstream server
-	conn, err := net.DialTimeout("tcp", s.proxy.upstreamServer, 30*time.Second)
-	if err != nil {
-		return fmt.Errorf("failed to connect to upstream: %w", err)
-	}
-	defer conn.Close()
-
-	reader := bufio.NewReader(conn)
-
-	// Read greeting
-	greeting, err := reader.ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("failed to read upstream greeting: %w", err)
-	}
-	if verbose {
-		log.Printf("Upstream greeting: %s", strings.TrimSpace(greeting))
-	}
-
-	// Send EHLO
-	fmt.Fprintf(conn, "EHLO mailscript-proxy\r\n")
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("EHLO response error: %w", err)
-		}
-		if verbose {
-			log.Printf("<- %s", strings.TrimSpace(line))
-		}
-		if !strings.HasPrefix(line, "250-") {
-			break
-		}
-	}
-
-	// Send MAIL FROM. An upstream rejection here (bad sender, rate limit) must
-	// be surfaced with its real code, not swallowed.
-	fmt.Fprintf(conn, "MAIL FROM:<%s>\r\n", s.from)
-	if code, text, err := readSMTPReply(reader); err != nil {
-		return fmt.Errorf("MAIL FROM error: %w", err)
-	} else if code < 200 || code >= 300 {
-		return &upstreamError{code: code, stage: "MAIL FROM", text: text}
-	}
-
-	// Send RCPT TO for each recipient and check each response. Previously the
-	// responses were read and discarded, so an upstream "554 relay denied" at
-	// this stage was ignored and DATA was sent anyway — the rejection only
-	// surfaced, misleadingly, at end-of-DATA. Track which recipients the
-	// upstream accepts; if none are accepted, fail with the last code.
-	var accepted []string
-	var lastRejectCode int
-	var lastRejectText string
-	for _, rcpt := range s.recipients {
-		fmt.Fprintf(conn, "RCPT TO:<%s>\r\n", rcpt)
-		code, text, err := readSMTPReply(reader)
-		if err != nil {
-			return fmt.Errorf("RCPT TO error: %w", err)
-		}
-		if code >= 200 && code < 300 {
-			accepted = append(accepted, rcpt)
-		} else {
-			lastRejectCode, lastRejectText = code, text
-			log.Printf("upstream rejected recipient %s: %s", rcpt, strings.TrimSpace(text))
-		}
-	}
-	if len(accepted) == 0 {
-		// No deliverable recipients. Surface the upstream's own code so a
-		// permanent (5xx) rejection is not downgraded to a temporary retry.
-		if lastRejectCode == 0 {
-			lastRejectCode = 550
-		}
-		return &upstreamError{code: lastRejectCode, stage: "RCPT TO", text: lastRejectText}
-	}
-
-	// Send DATA and require the 354 go-ahead before streaming the body.
-	fmt.Fprintf(conn, "DATA\r\n")
-	if code, text, err := readSMTPReply(reader); err != nil {
-		return fmt.Errorf("DATA command error: %w", err)
-	} else if code != 354 {
-		return &upstreamError{code: code, stage: "DATA", text: text}
-	}
-
-	// Send message data
-	if _, err := conn.Write(dotStuff(s.data)); err != nil {
-		return fmt.Errorf("message write error: %w", err)
-	}
-	if !bytes.HasSuffix(s.data, []byte("\r\n")) {
-		if _, err := fmt.Fprintf(conn, "\r\n"); err != nil {
-			return fmt.Errorf("message terminator error: %w", err)
-		}
-	}
-	if _, err := fmt.Fprintf(conn, ".\r\n"); err != nil {
-		return fmt.Errorf("message terminator error: %w", err)
-	}
-
-	// Final response to end-of-data.
-	code, text, err := readSMTPReply(reader)
-	if err != nil {
-		return fmt.Errorf("DATA response error: %w", err)
-	}
-	if code < 200 || code >= 300 {
-		return &upstreamError{code: code, stage: "end-of-DATA", text: text}
-	}
-
-	// Send QUIT
-	fmt.Fprintf(conn, "QUIT\r\n")
-
-	log.Printf("Message forwarded successfully to upstream")
-	return nil
 }
 
 // upstreamError carries the SMTP status the upstream returned so the proxy can
@@ -703,7 +751,7 @@ type upstreamError struct {
 }
 
 func (e *upstreamError) Error() string {
-	return fmt.Sprintf("upstream rejected at %s: %d %s", e.stage, e.code, e.message())
+	return fmt.Sprintf("upstream rejected at %s: %d %s", e.stage, e.code, smtpReplyText(e.message()))
 }
 
 // message returns the human-readable text of the upstream reply with the
@@ -730,7 +778,7 @@ func (e *upstreamError) message() string {
 // clientReply renders the SMTP line to send back to the client, preserving the
 // upstream's status code so permanent vs temporary class is not lost.
 func (e *upstreamError) clientReply() string {
-	return fmt.Sprintf("%d %s", e.code, e.message())
+	return fmt.Sprintf("%d %s", e.code, smtpReplyText(e.message()))
 }
 
 // readSMTPReply reads one complete SMTP reply, following multi-line
@@ -739,11 +787,27 @@ func (e *upstreamError) clientReply() string {
 // stream the moment an upstream sent a multi-line MAIL FROM/RCPT/DATA reply.
 func readSMTPReply(reader *bufio.Reader) (int, string, error) {
 	var full strings.Builder
+	expected := 0
 	for {
-		line, err := reader.ReadString('\n')
+		line, err := readWireLine(reader, 4096)
 		if err != nil {
 			return 0, "", err
 		}
+		if full.Len()+len(line) > 64*1024 {
+			return 0, "", fmt.Errorf("SMTP reply too large")
+		}
+		trimmed := strings.TrimRight(line, "\r\n")
+		if len(trimmed) < 3 {
+			return 0, "", fmt.Errorf("malformed SMTP reply")
+		}
+		code, parseErr := strconv.Atoi(trimmed[:3])
+		if parseErr != nil || code < 200 || code > 599 || (len(trimmed) > 3 && trimmed[3] != ' ' && trimmed[3] != '-') {
+			return 0, "", fmt.Errorf("malformed SMTP reply")
+		}
+		if expected != 0 && code != expected {
+			return 0, "", fmt.Errorf("inconsistent SMTP reply codes")
+		}
+		expected = code
 		full.WriteString(line)
 		// A continuation line has a '-' as the 4th character; the final line
 		// has a space (or is too short to continue).
@@ -771,15 +835,23 @@ func dotStuff(raw []byte) []byte {
 	return out
 }
 
-func (s *SMTPSession) handleRSET() {
+func (s *SMTPSession) resetTransaction() {
+	s.closeUpstream()
 	s.from = ""
 	s.recipients = nil
 	s.data = nil
+	s.mailSet = false
+	s.replyCode = 0
+	s.actions = nil
+}
+
+func (s *SMTPSession) handleRSET() {
+	s.resetTransaction()
 	s.writeLine("250 OK")
 }
 
 func (s *SMTPSession) handleSTARTTLS() {
-	if s.proxy.tlsConfig == nil {
+	if s.proxy.tlsConfig == nil || s.tlsActive {
 		s.writeLine("454 TLS not available")
 		return
 	}
@@ -789,9 +861,15 @@ func (s *SMTPSession) handleSTARTTLS() {
 	tlsConn := tls.Server(s.conn, s.proxy.tlsConfig)
 	if err := tlsConn.Handshake(); err != nil {
 		log.Printf("TLS handshake error: %v", err)
+		s.conn.Close()
 		return
 	}
 
+	s.resetTransaction()
+	s.helo = ""
+	s.authenticated = false
+	s.authUser, s.authPassword = "", ""
+	s.tlsActive = true
 	s.conn = tlsConn
 	s.reader = bufio.NewReader(tlsConn)
 	log.Printf("TLS connection established")

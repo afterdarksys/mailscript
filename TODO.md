@@ -1,6 +1,49 @@
 # TODO
 
-There are no known outstanding repository items as of 2026-07-31.
+## Enterprise filtering work
+
+See `docs/ENTERPRISE-GAPS.md` for the assessed capabilities, platform reuse,
+prioritized gaps and proposed Starlark interfaces. Silent diversion and envelope
+BCC screening are implemented and explicitly tested. Structured MIME mutation,
+complete inspection status, durable evidence primitives and the platform
+compliance adapter remain outstanding; existing action names alone do not
+implement those capabilities.
+
+## Filtering-layer integration status (2026-09-07)
+
+The SMTP gateway and gRPC delivery contract now have regression coverage for
+policy rejections/defer, null envelope senders, command injection, raw messages,
+quarantine forwarding, SMTP transparency, transaction resets, and partial
+recipient failures. See `docs/INTEGRATION.md` for deployment and limitations.
+
+## Completed in the delivery and operations pass
+
+- Validate SMTP recipients in the same backend transaction before accepting RCPT.
+- Support required STARTTLS, implicit TLS, private CAs, backend service accounts,
+  and client submission authentication delegated to the encrypted backend.
+- Execute native redirect/divert/copy routing and support atomic host delivery
+  through a capability-checked, idempotent HTTP adapter contract.
+- Snapshot root policy and modules, atomically reload on SIGHUP, and retain the
+  previous generation when a reload is invalid.
+- Stop admission and drain active SMTP/gRPC work on shutdown, with a deadline.
+- Add isolated real-MTA and platform integration harnesses. See
+  `tests/integration/README.md` for tested versions and reproduction commands.
+
+Host-specific folder, reply, digest and DLP implementations belong to the host
+adapter. Deployments must implement the advertised capabilities; MailScript
+refuses unsupported plans and does not silently simulate those operations.
+
+## Completed in the gateway integration pass
+
+- Share blocking policy decisions across SMTP and gRPC; expose SMTP response
+  codes, processed bytes, removed headers, and confirmed forwarding in gRPC.
+- Preserve original RFC message bytes and connection metadata in the API.
+- Require an upstream and bind all listeners before reporting readiness.
+- Bound SMTP connections, message/line sizes, recipients, and network waits;
+  reset envelope state across DATA, HELO/EHLO, RSET, and STARTTLS.
+- Reject mixed upstream recipient outcomes before DATA to prevent silent loss.
+- Document the existing go-emailservice-ads trusted quarantine contract and add
+  a portable gateway policy.
 
 ## Completed in the security and policy pass
 

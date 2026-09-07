@@ -1,6 +1,8 @@
 # MailScript
 
-Starlark-based email filtering that runs anywhere: offline against sample
+A mail-system-independent filtering companion, designed for
+`go-emailservice-ads` and usable with Postfix, Sendmail, qmail, Exim, and other
+SMTP servers. Starlark-based email filtering that runs anywhere: offline against sample
 messages, over mailboxes, or as an SMTP proxy in front of any mail server.
 
 ```bash
@@ -29,8 +31,11 @@ cd mailscript
 - **Open-source analysis sidecars** for explainable executable, document,
   OCR/QR, and sandbox findings without loading native parsers into the mail
   process.
-- **mbox and Maildir processing**, JSON output, an SMTP proxy, and a gRPC
-  interface.
+- **Portable SMTP gateway** with recipient validation, backend TLS, delegated
+  submission authentication, native redirects, and a host delivery adapter API.
+- **Atomic policy reload and bounded shutdown**, with per-message snapshots.
+- **mbox and Maildir processing**, JSON output, and a gRPC interface preserving
+  original message bytes and explicit delivery outcomes.
 
 See [SPEC.md](SPEC.md) for the complete language and builtin reference.
 
@@ -160,10 +165,10 @@ mailscript repl --script=filter.star
 
 ```bash
 mailscript proxy --script=filter.star --upstream=mail.example.com:25
-mailscript proxy --script=filter.star --enable-tls --cert=cert.pem --key=key.pem
+mailscript proxy --script=filter.star --upstream=127.0.0.1:2525 --enable-tls --cert=cert.pem --key=key.pem
 ```
 
-Listens on 3025 and 3587 by default, so no root and no conflict with an
+Binds to loopback on 3025 and 3587 by default, so no root and no conflict with an
 existing mail server.
 
 ```
@@ -171,6 +176,13 @@ existing mail server.
                       |
                [gRPC apps:50051]
 ```
+
+The proxy requires `--upstream` and acknowledges delivery only after upstream
+acceptance. Use `--listen` to choose another bind address. See the
+[integration guide](docs/INTEGRATION.md) for the portable gateway policy,
+platform quarantine configuration, SMTP action semantics, and gRPC contract.
+The [live qualification guide](tests/integration/README.md) records the tested
+mail-server matrix and reproduction commands.
 
 ## Writing rules
 

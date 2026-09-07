@@ -14,6 +14,8 @@ import (
 
 // Options controls how a rule script is executed.
 type Options struct {
+	moduleSources map[string]string
+
 	// MaxSteps bounds Starlark execution. A rule that loops forever would
 	// otherwise wedge an SMTP worker; the limit turns that into a per-message
 	// error. Zero applies DefaultMaxSteps.
@@ -111,7 +113,7 @@ func ExecuteEngineWithOptions(scriptSource string, msg *MessageContext, opts Opt
 			return nil, fmt.Errorf("load: module must be a relative .star path")
 		}
 		path, err := filepath.Abs(filepath.Join(root, filepath.Clean(module)))
-		if err == nil {
+		if err == nil && opts.moduleSources == nil {
 			path, err = filepath.EvalSymlinks(path)
 		}
 		if err != nil {
@@ -128,7 +130,16 @@ func ExecuteEngineWithOptions(scriptSource string, msg *MessageContext, opts Opt
 		}
 		loading[path] = true
 		defer delete(loading, path)
-		source, err := os.ReadFile(path)
+		var source []byte
+		if opts.moduleSources != nil {
+			snapshot, ok := opts.moduleSources[path]
+			if !ok {
+				return nil, fmt.Errorf("module %q absent from policy snapshot", module)
+			}
+			source = []byte(snapshot)
+		} else {
+			source, err = os.ReadFile(path)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("load %q: %w", module, err)
 		}
@@ -254,6 +265,7 @@ func (e *scriptEnv) predeclared() starlark.StringDict {
 		e.actionBuiltins,
 		e.headerBuiltins,
 		e.matchBuiltins,
+		e.fieldBuiltins,
 		e.metadataBuiltins,
 		e.validationBuiltins,
 		e.identityBuiltins,

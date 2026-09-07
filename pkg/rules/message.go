@@ -438,13 +438,7 @@ func (m *MessageContext) decodeMIME() {
 	ctype := m.Get("Content-Type")
 	if ctype == "" {
 		// No Content-Type: treat the whole body as text/plain per RFC 2045.
-		m.TextBody = m.Body
-		m.Parts = []MIMEPart{{
-			ContentType: "text/plain",
-			Size:        int64(len(m.Body)),
-			Content:     m.Body,
-		}}
-		return
+		ctype = "text/plain"
 	}
 
 	mediaType, params, err := mime.ParseMediaType(ctype)
@@ -455,16 +449,31 @@ func (m *MessageContext) decodeMIME() {
 
 	if !strings.HasPrefix(mediaType, "multipart/") {
 		decoded := decodeBody([]byte(m.Body), m.Get("Content-Transfer-Encoding"))
+		disposition, dispParams, _ := mime.ParseMediaType(m.Get("Content-Disposition"))
+		filename := dispParams["filename"]
+		if filename == "" {
+			filename = params["name"]
+		}
+		filename = decodeWord(filename)
 		part := MIMEPart{
 			ContentType: mediaType,
 			Charset:     params["charset"],
+			Disposition: disposition,
+			Filename:    filename,
 			Size:        int64(len(decoded)),
 		}
-		if strings.HasPrefix(mediaType, "text/") {
+		if strings.HasPrefix(mediaType, "text/") && disposition != "attachment" {
 			part.Content = string(decoded)
 			m.assignTextPart(mediaType, string(decoded))
 		}
 		m.Parts = append(m.Parts, part)
+		if disposition == "attachment" || filename != "" {
+			sum := sha256.Sum256(decoded)
+			m.Attachments = append(m.Attachments, Attachment{
+				Filename: filename, ContentType: mediaType, Disposition: disposition,
+				Size: int64(len(decoded)), SHA256: hex.EncodeToString(sum[:]), IsInline: disposition == "inline",
+			})
+		}
 		return
 	}
 

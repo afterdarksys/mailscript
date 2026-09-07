@@ -3,6 +3,7 @@ module github.com/afterdarksys/mailscript
 go 1.21
 
 require (
+	github.com/abadojack/whatlanggo v1.0.1
 	github.com/miekg/dns v1.1.62
 	github.com/sjwhitworth/golearn v0.0.0-20221228163002-74ae077eafb2
 	github.com/spf13/cobra v1.8.0

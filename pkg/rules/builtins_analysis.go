@@ -541,6 +541,14 @@ func (e *scriptEnv) contentBuiltins() starlark.StringDict {
 func (e *scriptEnv) attachmentBuiltins() starlark.StringDict {
 	msg := e.msg
 	return starlark.StringDict{
+		"attachment_types": nullaryList("attachment_types", func() []string {
+			types := make([]string, 0, len(msg.Attachments))
+			for _, attachment := range msg.Attachments {
+				types = append(types, attachment.ContentType)
+			}
+			return types
+		}),
+
 		"get_attachments": nullary("get_attachments", func() starlark.Value {
 			values := make([]starlark.Value, 0, len(msg.Attachments))
 			for _, a := range msg.Attachments {

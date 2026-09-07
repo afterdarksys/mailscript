@@ -1,0 +1,19 @@
+FROM debian:bookworm-slim
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y -qq git ca-certificates gcc make libc6-dev ucspi-tcp groff-base
+RUN git clone --depth 1 --branch notqmail-1.09 https://github.com/notqmail/notqmail.git /build && \
+    test "$(git -C /build rev-parse HEAD)" = 9f2f76e4f5b92f92f3e0e175dc01ab5144da0efc
+RUN groupadd nofiles && groupadd qmail && \
+    useradd -g nofiles -d /var/qmail/alias alias && \
+    useradd -g nofiles -d /var/qmail qmaild && \
+    useradd -g nofiles -d /var/qmail qmaill && \
+    useradd -g nofiles -d /var/qmail qmailp && \
+    useradd -g qmail -d /var/qmail qmailq && \
+    useradd -g qmail -d /var/qmail qmailr && \
+    useradd -g qmail -d /var/qmail qmails && \
+    mkdir -p /var/qmail && cd /build && make setup check
+RUN useradd -m -s /bin/sh probe && /var/qmail/bin/maildirmake /home/probe/Maildir && chown -R probe:probe /home/probe/Maildir
+RUN printf 'mail.test\n' > /var/qmail/control/me && \
+    printf 'mail.test\nlocalhost\n' > /var/qmail/control/locals && \
+    printf 'mail.test\nlocalhost\n' > /var/qmail/control/rcpthosts
+COPY qmail-start.sh /start.sh
+ENTRYPOINT ["/bin/sh", "/start.sh"]
