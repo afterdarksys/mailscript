@@ -10,7 +10,10 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o /build/bin/mailscript ./cmd/mailscript
+RUN VERSION=$(cat VERSION) && BUILD_TIME=$(date -u "+%Y-%m-%d_%H:%M:%S") && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-w -s -X main.Version=$VERSION -X main.BuildTime=$BUILD_TIME -X main.GoVersion=$(go version | awk '{print $3}')" \
+    -o /build/bin/mailscript ./cmd/mailscript
 
 # Final stage
 FROM alpine:latest

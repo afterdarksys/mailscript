@@ -3,8 +3,14 @@ set -e
 
 echo " Building MailScript..."
 
-# Get version from git or use default
-VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+# Version: an exact release tag wins; otherwise the VERSION file plus the short
+# commit so untagged builds are still attributable (e.g. 1.0.0+b0ba851).
+if VERSION=$(git describe --tags --exact-match 2>/dev/null); then
+  :
+else
+  VERSION="$(cat "$(dirname "$0")/VERSION")+$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
+  [ -n "$(git status --porcelain 2>/dev/null)" ] && VERSION="$VERSION-dirty"
+fi
 BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
 GO_VERSION=$(go version | awk '{print $3}')
 
